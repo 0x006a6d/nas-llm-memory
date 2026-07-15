@@ -10,33 +10,37 @@ set -u
 
 : "${NAS_IP:?環境変数 NAS_IP を設定してください (例: NAS_IP=192.168.x.x $0)}"
 INGEST_URL="https://${NAS_IP}:8800"
-CONFIG_DIR="$HOME/claude-config"
+# 配置パスはスクリプト自身の位置から導出する(クローン先の名前に依存しない)。
+# hooks/ templates/ はこのスクリプトの親ディレクトリ直下にある前提
+CONFIG_DIR="$(cd -- "$(dirname -- "$0")/.." && pwd)" || exit 1
 CLAUDE_DIR="$HOME/.claude"
 SPOOL_DIR="$HOME/.claude-spool"
 
-echo "== claude-config 端末セットアップ =="
+echo "== claude-config 端末セットアップ ($CONFIG_DIR) =="
 
 # 0. 前提確認
 command -v python3 >/dev/null || { echo "ERROR: python3 が必要です"; exit 1; }
 command -v git >/dev/null || { echo "ERROR: git が必要です"; exit 1; }
-[ -d "$CONFIG_DIR" ] || { echo "ERROR: $CONFIG_DIR がありません。先にcloneしてください"; exit 1; }
+[ -d "$CONFIG_DIR/hooks" ] || { echo "ERROR: $CONFIG_DIR/hooks がありません"; exit 1; }
 
 mkdir -p "$CLAUDE_DIR" "$SPOOL_DIR/pending" "$SPOOL_DIR/sent"
 chmod +x "$CONFIG_DIR"/hooks/*.sh "$CONFIG_DIR"/hooks/*.py 2>/dev/null
 
-# 1. skills symlink
-if [ -e "$CLAUDE_DIR/skills" ] && [ ! -L "$CLAUDE_DIR/skills" ]; then
-    echo "  既存の $CLAUDE_DIR/skills を skills.bak に退避"
-    mv "$CLAUDE_DIR/skills" "$CLAUDE_DIR/skills.bak"
+# 1. skills symlink(配布リポジトリにskillsがある場合のみ)
+if [ -d "$CONFIG_DIR/skills" ]; then
+    if [ -e "$CLAUDE_DIR/skills" ] && [ ! -L "$CLAUDE_DIR/skills" ]; then
+        echo "  既存の $CLAUDE_DIR/skills を skills.bak に退避"
+        mv "$CLAUDE_DIR/skills" "$CLAUDE_DIR/skills.bak"
+    fi
+    ln -sfn "$CONFIG_DIR/skills" "$CLAUDE_DIR/skills"
+    echo "  skills → $CONFIG_DIR/skills"
 fi
-ln -sfn "$CONFIG_DIR/skills" "$CLAUDE_DIR/skills"
-echo "  skills → $CONFIG_DIR/skills"
 
 # 2. settings.json にhooksをマージ(既存設定は保持)
-python3 - "$CLAUDE_DIR/settings.json" "$CONFIG_DIR/templates/settings.json.tmpl" <<'PYEOF'
+python3 - "$CLAUDE_DIR/settings.json" "$CONFIG_DIR/templates/settings.json.tmpl" "$CONFIG_DIR" <<'PYEOF'
 import json, os, sys
-settings_path, tmpl_path = sys.argv[1], sys.argv[2]
-tmpl = json.loads(open(tmpl_path).read().replace("{{HOME}}", os.path.expanduser("~")))
+settings_path, tmpl_path, config_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+tmpl = json.loads(open(tmpl_path).read().replace("{{CONFIG_DIR}}", config_dir))
 settings = {}
 if os.path.exists(settings_path):
     settings = json.load(open(settings_path))
@@ -128,7 +132,7 @@ esac
 
 # 6. ユーザーレベルCLAUDE.mdへの@import(設計書§7)
 USER_MD="$CLAUDE_DIR/CLAUDE.md"
-IMPORT_LINE="@~/claude-config/memory/general/index.md"
+IMPORT_LINE="@$CONFIG_DIR/memory/general/index.md"
 if ! grep -qF "$IMPORT_LINE" "$USER_MD" 2>/dev/null; then
     printf "\n%s\n" "$IMPORT_LINE" >> "$USER_MD"
     echo "  CLAUDE.md: general index を@import"
@@ -136,5 +140,5 @@ fi
 
 echo "== 完了 =="
 echo "プロジェクトごとのindex注入は、各プロジェクトのCLAUDE.mdに"
-echo "  @~/claude-config/memory/<project-key>/index.md"
+echo "  @$CONFIG_DIR/memory/<project-key>/index.md"
 echo "を追記してください(indexは夜間バッチが生成した時点から有効)"

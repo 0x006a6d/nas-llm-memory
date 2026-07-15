@@ -6,6 +6,7 @@
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +52,8 @@ def _shutdown() -> None:
 
 def require_token(request: Request) -> None:
     auth = request.headers.get("authorization", "")
-    if not auth.startswith("Bearer ") or auth[7:].strip() != API_TOKEN:
+    # compare_digest: 比較時間からトークンを推測されないように(タイミング攻撃対策)
+    if not auth.startswith("Bearer ") or not secrets.compare_digest(auth[7:].strip(), API_TOKEN):
         raise HTTPException(status_code=401, detail="invalid token")
 
 

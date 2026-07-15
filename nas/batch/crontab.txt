@@ -1,4 +1,5 @@
 # NASホスト(NAS_USER)のcrontab — 復元用マスター(手順書§7)
+# NAS_USER は deploy_nas_batch.sh が配置時に実行ユーザーへ展開するプレースホルダー
 # UGOSアップデートでcrontabが消えた場合: crontab /volume2/claude-system/batch/crontab.txt
 # (deploy_nas_batch.sh がリポジトリの nas/batch/ からこの場所へ配置する)
 # 注意: UGOSの自動メンテナンス(SMART検査等)の時間帯と重ねないこと

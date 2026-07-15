@@ -78,6 +78,7 @@ def main():
     # --- auto memory: 前回スキャン以降に更新されたmarkdown(設計書§3.1)
     state = SPOOL / "last_memory_scan"
     last = state.stat().st_mtime if state.exists() else 0
+    scan_start = time.time()  # スキャン中に更新されたファイルを次回対象に残す基準
     failed_mtimes = []
     projects_root = Path.home() / ".claude" / "projects"
     if projects_root.exists():
@@ -106,12 +107,14 @@ def main():
                 }, f"mem-{event_id}.json")
             except Exception:
                 failed_mtimes.append(mtime)
-    # watermarkは失敗した最古のファイルの手前まで: 失敗分は次回必ず再スキャンされる
+    # watermarkは「スキャン開始時刻」と「失敗した最古のファイルの手前」の小さい方:
+    # スキャン中に更新されたファイルも失敗分も、次回必ず再スキャンされる
     # (再送で生じる重複はDB側のUNIQUE(device, file_path, file_mtime)が吸収する)
-    state.touch()
+    t = scan_start
     if failed_mtimes:
-        t = max(min(failed_mtimes) - 1, 0)
-        os.utime(state, (t, t))
+        t = min(t, max(min(failed_mtimes) - 1, 0))
+    state.touch()
+    os.utime(state, (t, t))
 
 
 if __name__ == "__main__":

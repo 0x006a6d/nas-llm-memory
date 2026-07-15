@@ -3,14 +3,14 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "\"{{HOME}}/claude-config/hooks/session_start.sh\"" }
+          { "type": "command", "command": "\"{{CONFIG_DIR}}/hooks/session_start.sh\"" }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"{{HOME}}/claude-config/hooks/spool_write.py\"" }
+          { "type": "command", "command": "python3 \"{{CONFIG_DIR}}/hooks/spool_write.py\"" }
         ]
       }
     ]
