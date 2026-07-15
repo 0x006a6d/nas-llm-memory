@@ -1,0 +1,12 @@
+# NASホスト(NAS_USER)のcrontab — 復元用マスター(手順書§7)
+# UGOSアップデートでcrontabが消えた場合: crontab /volume2/claude-system/work/claude-config/batch/crontab.txt
+# 注意: UGOSの自動メンテナンス(SMART検査等)の時間帯と重ねないこと
+
+# 夜間統合バッチ(設計書§6)
+30 3 * * *  /volume2/claude-system/batch/nightly.sh >> /volume2/claude-system/batch/nightly.log 2>&1
+
+# DBバックアップ(日次04:30)
+30 4 * * *  /volume2/claude-system/batch/backup.sh
+
+# sender(NAS自身も端末として送信 — 設計書§8)
+17 * * * *  python3 /volume1/homes/NAS_USER/claude-config/hooks/sender.py
