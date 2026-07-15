@@ -49,7 +49,16 @@
 
 ## セットアップ概要
 
-NAS 側: `nas/` を配置し、`ingest/secrets/` に `api_token` と `db_password` を置き (600)、`ingest/gen_tls_cert.sh <NASのIP>` で TLS 証明書を生成、`nas/.env` に `INGEST_BIND_IP=<NASのLAN IP>` を書いてから `docker compose up -d`。スキーマ SQL を適用し、`nas/batch/crontab.txt` を参考に cron を登録する。
+NAS 側: `nas/` を配置し、`ingest/secrets/` に `api_token` と `db_password` を置き (600)、`ingest/gen_tls_cert.sh <NASのIP>` で TLS 証明書を生成、`nas/.env` に `INGEST_BIND_IP=<NASのLAN IP>` を書いてから `docker compose up -d`。スキーマは番号順に適用する (`002_pgroonga.sql` は PGroonga で全文検索する場合のみ):
+
+```bash
+cd nas
+for f in ingest/schema/001_init.sql ingest/schema/003_p2.sql ingest/schema/004_event_id.sql; do
+  docker compose exec -T db psql -U claude -d claude_memory -v ON_ERROR_STOP=1 -f - < "$f"
+done
+```
+
+cron は `nas/batch/crontab.txt` を参考に登録する (配置は `terminal/setup/deploy_nas_batch.sh`)。
 
 端末側:
 

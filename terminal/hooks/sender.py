@@ -17,6 +17,11 @@ CONFIG = SPOOL / "config.json"
 SENT_KEEP_DAYS = 14  # 障害復旧用にsentを保持(設計書§10 P0)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # 追従しない → HTTPErrorになり送信失敗として扱われる
+
+
 def main():
     if not CONFIG.exists():
         return
@@ -33,6 +38,10 @@ def main():
     if not cert or not Path(cert).exists():
         return
     ctx = ssl.create_default_context(cafile=cert)
+    # リダイレクト追従を拒否: urllibは3xxでAuthorizationヘッダごと転送先へ再送するため、
+    # http/別ホストへ誘導されるとBearerトークンが漏れる。3xxはHTTPError=失敗として扱う
+    opener = urllib.request.build_opener(
+        _NoRedirect(), urllib.request.HTTPSHandler(context=ctx))
 
     pending = SPOOL / "pending"
     sent = SPOOL / "sent"
@@ -57,7 +66,7 @@ def main():
                     "Authorization": f"Bearer {token}",
                 },
             )
-            with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+            with opener.open(req, timeout=60) as resp:
                 if resp.status == 200:
                     f.rename(sent / f.name)
                 else:

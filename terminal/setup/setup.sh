@@ -40,7 +40,18 @@ fi
 python3 - "$CLAUDE_DIR/settings.json" "$CONFIG_DIR/templates/settings.json.tmpl" "$CONFIG_DIR" <<'PYEOF'
 import json, os, sys
 settings_path, tmpl_path, config_dir = sys.argv[1], sys.argv[2], sys.argv[3]
-tmpl = json.loads(open(tmpl_path).read().replace("{{CONFIG_DIR}}", config_dir))
+
+# 置換はJSON解析後に行う: 生テキスト置換だとパスに " や \ が入ったときJSONが壊れる
+def subst(o):
+    if isinstance(o, str):
+        return o.replace("{{CONFIG_DIR}}", config_dir)
+    if isinstance(o, list):
+        return [subst(v) for v in o]
+    if isinstance(o, dict):
+        return {k: subst(v) for k, v in o.items()}
+    return o
+
+tmpl = subst(json.load(open(tmpl_path)))
 settings = {}
 if os.path.exists(settings_path):
     settings = json.load(open(settings_path))
