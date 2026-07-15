@@ -9,6 +9,7 @@
 - 冪等: 前回成功runのwatermark以降のみ処理。途中失敗しても翌晩に追いつく
 - 成功時は無通知、失敗時のみstderr(→nightly.log)に残す
 """
+import fcntl
 import hashlib
 import json
 import os
@@ -351,6 +352,15 @@ def enrich(project_key: str) -> int:
 
 
 def main():
+    # 多重起動の排他: 並行runは同じwatermarkを読んで同一データを二重処理し、
+    # 片方の失敗補償(facts削除・repo reset)が他方の結果まで壊す
+    lock = open(SYSTEM_DIR / "batch" / ".nightly.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("another nightly run is active; exiting")
+        return
+
     run_id = None
     try:
         # 配布先リポジトリを最新化

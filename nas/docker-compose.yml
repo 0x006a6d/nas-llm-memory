@@ -34,7 +34,9 @@ services:
       DB_PASSWORD_FILE: /run/secrets/db_password
       API_TOKEN_FILE: /run/secrets/api_token
     ports:
-      - "8800:8800"              # LAN内の各端末からPOSTを受ける(HTTPS)
+      # LAN内の各端末からPOSTを受ける(HTTPS)。全インターフェース公開を避けるため
+      # バインド先IPは必須: nas/.env に INGEST_BIND_IP=<NASのLAN IP> を書く
+      - "${INGEST_BIND_IP:?nas/.env に INGEST_BIND_IP=<NASのLAN IP> を設定}:8800:8800"
     depends_on:
       db:
         condition: service_healthy

@@ -24,13 +24,15 @@ def main():
     url = cfg["ingest_url"].rstrip("/") + "/ingest"
     token = cfg["api_token"]
 
-    # ingestは自己署名TLS: setup.shがピン止めした証明書(tls_cert)で検証する。
-    # 証明書が無ければシステムストアで検証され、失敗した分はスプールに残って次回再送
-    ctx = None
-    if url.startswith("https"):
-        cert = cfg.get("tls_cert")
-        cafile = cert if cert and Path(cert).exists() else None
-        ctx = ssl.create_default_context(cafile=cafile)
+    # ingestは自己署名TLS: https + setup.shがピン止めした証明書(tls_cert)を必須にする。
+    # httpや証明書未取得のまま送るとBearerトークンと全ペイロードが平文/検証なしで流れるため、
+    # 条件が揃わない間は送信しない(スプールに残り、証明書取得後に再送される)
+    if not url.startswith("https"):
+        return
+    cert = cfg.get("tls_cert")
+    if not cert or not Path(cert).exists():
+        return
+    ctx = ssl.create_default_context(cafile=cert)
 
     pending = SPOOL / "pending"
     sent = SPOOL / "sent"

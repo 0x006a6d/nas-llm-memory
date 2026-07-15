@@ -52,16 +52,31 @@ json.dump(settings, open(settings_path, "w"), indent=2, ensure_ascii=False)
 print("  settings.json: hooks設定を確認/追記")
 PYEOF
 
-# 3. ingest TLS証明書のピン止め(trust-on-first-use。fingerprintをNAS側と目視照合する)
+# 3. ingest TLS証明書のピン止め(fingerprintの目視照合を通ったものだけ保存する。
+#    照合前に保存するとMITM証明書まで永続的に信頼してしまう)
 CERT_FILE="$SPOOL_DIR/ingest_cert.pem"
 if [ ! -f "$CERT_FILE" ]; then
+    CERT_TMP=$(mktemp)
     if command -v openssl >/dev/null \
         && openssl s_client -connect "${NAS_IP}:8800" </dev/null 2>/dev/null \
-           | openssl x509 > "$CERT_FILE" 2>/dev/null; then
-        echo "  ingest証明書を取得。NAS側 gen_tls_cert.sh の出力とfingerprintを照合してください:"
-        openssl x509 -in "$CERT_FILE" -noout -fingerprint -sha256 | sed 's/^/    /'
+           | openssl x509 > "$CERT_TMP" 2>/dev/null; then
+        echo "  取得したingest証明書のfingerprint:"
+        openssl x509 -in "$CERT_TMP" -noout -fingerprint -sha256 | sed 's/^/    /'
+        printf "  NAS側 gen_tls_cert.sh が表示した値と一致しますか? [y/N] "
+        read -r ANS
+        case "$ANS" in
+        y|Y)
+            mv "$CERT_TMP" "$CERT_FILE"
+            chmod 600 "$CERT_FILE"
+            echo "  証明書をピン止めしました"
+            ;;
+        *)
+            rm -f "$CERT_TMP"
+            echo "  証明書を保存しませんでした。senderはピン止め証明書が無い間は送信しません"
+            ;;
+        esac
     else
-        rm -f "$CERT_FILE"
+        rm -f "$CERT_TMP"
         echo "  WARN: ingest証明書を取得できませんでした(NASのingest未起動?)。起動後に再実行してください"
     fi
 fi

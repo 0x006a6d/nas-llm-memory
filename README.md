@@ -49,7 +49,7 @@
 
 ## セットアップ概要
 
-NAS 側: `nas/` を配置し、`ingest/secrets/` に `api_token` と `db_password` を置き (600)、`ingest/gen_tls_cert.sh <NASのIP>` で TLS 証明書を生成してから `docker compose up -d`。スキーマ SQL を適用し、`nas/batch/crontab.txt` を参考に cron を登録する。
+NAS 側: `nas/` を配置し、`ingest/secrets/` に `api_token` と `db_password` を置き (600)、`ingest/gen_tls_cert.sh <NASのIP>` で TLS 証明書を生成、`nas/.env` に `INGEST_BIND_IP=<NASのLAN IP>` を書いてから `docker compose up -d`。スキーマ SQL を適用し、`nas/batch/crontab.txt` を参考に cron を登録する。
 
 端末側:
 

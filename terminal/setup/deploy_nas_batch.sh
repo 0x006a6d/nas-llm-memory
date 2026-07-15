@@ -7,6 +7,7 @@ REPO_DIR="${1:-$HOME/nas-llm-memory}"
 SRC="$REPO_DIR/nas/batch"
 DEST="/volume2/claude-system/batch"
 
+mkdir -p "$DEST"
 cp "$SRC"/nightly.sh "$SRC"/nightly.py "$SRC"/backup.sh "$SRC"/crontab.txt "$DEST/"
 chmod +x "$DEST"/nightly.sh "$DEST"/backup.sh
 echo "deployed to $DEST"
