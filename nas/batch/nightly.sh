@@ -12,5 +12,6 @@ if [ -d "$HOME/.nvm/versions/node" ]; then
 fi
 
 # deploy_nas_batch.sh が nightly.py を同じディレクトリに配置する
+# 引数はそのまま渡す(--init-watermark / --backfill-distill N)
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd) || exit 1
-exec python3 "$SCRIPT_DIR/nightly.py"
+exec python3 "$SCRIPT_DIR/nightly.py" "$@"

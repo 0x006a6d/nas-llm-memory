@@ -53,7 +53,8 @@ NAS 側: `nas/` を配置し、`ingest/secrets/` に `api_token` と `db_passwor
 
 ```bash
 cd nas
-for f in ingest/schema/001_init.sql ingest/schema/003_p2.sql ingest/schema/004_event_id.sql; do
+for f in ingest/schema/001_init.sql ingest/schema/003_p2.sql \
+         ingest/schema/004_event_id.sql ingest/schema/005_backfill.sql; do
   docker compose exec -T db psql -U claude -d claude_memory -v ON_ERROR_STOP=1 -f - < "$f"
 done
 ```
@@ -68,6 +69,14 @@ NAS_IP=<NASのIP> ~/claude-config/setup/setup.sh
 ```
 
 setup.sh は冪等で、skills の symlink、settings.json への hooks マージ、スプール設定、sender の定期実行登録 (macOS は launchd、Linux は cron)、ユーザーレベル CLAUDE.md への index @import を行う。
+
+## 初回データ移行 (バックフィル)
+
+定常経路は「今後発生するログ」のみを扱う。既存の過去ログは稼働開始の最初期に一度だけ流し込む (Claude Code のローカル保持期間で古いセッションから消えるため、遅らせない)。詳細は `docs/backfill.md`。
+
+1. 各端末で `terminal/setup/backfill-claude.sh` を実行 (過去トランスクリプトと auto memory をスプールへ。送信は sender 任せ、再実行無害)
+2. 送信が済んだら NAS で `nightly.py --init-watermark` を一度実行 (過去分を定常バッチの対象外にする)
+3. 過去分の蒸留は `nightly.py --backfill-distill 2` を夜間に回す (プロジェクト×月チャンク、アクティブ優先、既存事実と矛盾する過去の事実は常に負ける)。`nas/batch/crontab.txt` のコメント行を有効化し、全プロジェクト完了で外す
 
 ## 前提
 
