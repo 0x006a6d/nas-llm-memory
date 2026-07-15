@@ -21,6 +21,11 @@ services:
   ingest:
     build: ./ingest
     restart: unless-stopped
+    # 自己署名TLSで終端(証明書は ingest/gen_tls_cert.sh で生成)。
+    # 平文HTTPだとBearerトークンと全ペイロードがLAN上で盗聴・改ざんできてしまう
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8800",
+              "--ssl-certfile", "/run/secrets/tls_cert",
+              "--ssl-keyfile", "/run/secrets/tls_key"]
     environment:
       DB_HOST: db
       DB_PORT: "5432"
@@ -29,16 +34,22 @@ services:
       DB_PASSWORD_FILE: /run/secrets/db_password
       API_TOKEN_FILE: /run/secrets/api_token
     ports:
-      - "8800:8800"              # LAN内の各端末からPOSTを受ける
+      - "8800:8800"              # LAN内の各端末からPOSTを受ける(HTTPS)
     depends_on:
       db:
         condition: service_healthy
     secrets:
       - db_password
       - api_token
+      - tls_cert
+      - tls_key
 
 secrets:
   db_password:
     file: ./ingest/secrets/db_password
   api_token:
     file: ./ingest/secrets/api_token
+  tls_cert:
+    file: ./ingest/secrets/tls_cert.pem
+  tls_key:
+    file: ./ingest/secrets/tls_key.pem

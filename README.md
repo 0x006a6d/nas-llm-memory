@@ -6,14 +6,14 @@
 
 ## 構成
 
-```
+```text
 [各端末 (Mac / WSL2)]
   SessionEnd hook → ~/.claude-spool/pending/ に JSON 書き出し (ネットワーク不使用)
   sender (SessionStart hook + 1時間おき cron/launchd) → NAS へ POST
   SessionStart hook → ~/claude-config を git pull --ff-only
 
 [NAS]
-  ingest API   : FastAPI (Docker), Bearer 認証, 受信時に秘密情報を正規表現マスク
+  ingest API   : FastAPI (Docker), 自己署名 TLS + Bearer 認証, 受信時に秘密情報を正規表現マスク
   PostgreSQL   : 17 + PGroonga (Docker)
   設定リポジトリ : claude-config.git (bare)。skills / hooks / memory index を全端末に配布
   夜間バッチ    : cron → nightly.py (VERIFY → ORGANIZE → ENRICH → git push)
@@ -49,7 +49,7 @@
 
 ## セットアップ概要
 
-NAS 側: `nas/` を配置して `docker compose up -d`、`ingest/secrets/` に `api_token` と `db_password` を置く (600)。スキーマ SQL を適用し、`nas/batch/crontab.txt` を参考に cron を登録する。
+NAS 側: `nas/` を配置し、`ingest/secrets/` に `api_token` と `db_password` を置き (600)、`ingest/gen_tls_cert.sh <NASのIP>` で TLS 証明書を生成してから `docker compose up -d`。スキーマ SQL を適用し、`nas/batch/crontab.txt` を参考に cron を登録する。
 
 端末側:
 

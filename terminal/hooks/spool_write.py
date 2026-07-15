@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 SPOOL = Path.home() / ".claude-spool"
@@ -57,9 +58,14 @@ def main():
     if tp and Path(tp).exists():
         transcript = Path(tp).read_text(errors="replace")
     if transcript:
+        # ファイル名は端末生成のevent_idのみで構成する:
+        # 外部入力(session_id)や同秒実行で宛先が衝突してatomic renameが上書きするのを防ぎ、
+        # ingest側の再送重複排除キーも兼ねる
+        event_id = uuid.uuid4().hex
         spool({
             "device": device,
             "kind": "transcript",
+            "event_id": event_id,
             "session_id": session_id,
             "project_dir": cwd,
             "git_remote_url": git_info(["remote", "get-url", "origin"], cwd),
@@ -67,33 +73,45 @@ def main():
             "transcript": transcript,
             "client_version": data.get("version"),
             "captured_at": captured_at,
-        }, f"{session_id}-{int(time.time())}.json")
+        }, f"transcript-{event_id}.json")
 
     # --- auto memory: 前回スキャン以降に更新されたmarkdown(設計書§3.1)
     state = SPOOL / "last_memory_scan"
     last = state.stat().st_mtime if state.exists() else 0
+    failed_mtimes = []
     projects_root = Path.home() / ".claude" / "projects"
     if projects_root.exists():
         for md in projects_root.glob("*/memory/**/*.md"):
             try:
                 mtime = md.stat().st_mtime
-                if mtime <= last:
-                    continue
+            except Exception:
+                failed_mtimes.append(last)  # mtime不明: watermarkを進めず次回リトライ
+                continue
+            if mtime <= last:
+                continue
+            try:
                 # project_keyはmungedディレクトリ名から(端末間で安定)
                 munged = md.relative_to(projects_root).parts[0]
+                event_id = uuid.uuid4().hex
                 spool({
                     "device": device,
                     "kind": "auto_memory",
+                    "event_id": event_id,
                     "project_dir": munged,
                     "git_remote_url": None,
                     "file_path": str(md),
                     "content": md.read_text(errors="replace"),
                     "file_mtime": iso(mtime),
                     "captured_at": captured_at,
-                }, f"mem-{munged}-{md.stem}-{int(mtime)}.json")
+                }, f"mem-{event_id}.json")
             except Exception:
-                continue
+                failed_mtimes.append(mtime)
+    # watermarkは失敗した最古のファイルの手前まで: 失敗分は次回必ず再スキャンされる
+    # (再送で生じる重複はDB側のUNIQUE(device, file_path, file_mtime)が吸収する)
     state.touch()
+    if failed_mtimes:
+        t = max(min(failed_mtimes) - 1, 0)
+        os.utime(state, (t, t))
 
 
 if __name__ == "__main__":

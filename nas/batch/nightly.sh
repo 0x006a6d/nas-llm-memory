@@ -11,4 +11,6 @@ if [ -d "$HOME/.nvm/versions/node" ]; then
     [ -n "$NODE_BIN" ] && export PATH="$NODE_BIN:$PATH"
 fi
 
-exec python3 "$HOME/claude-config/batch/nightly.py"
+# deploy_nas_batch.sh が nightly.py を同じディレクトリに配置する
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$SCRIPT_DIR/nightly.py"

@@ -9,6 +9,7 @@
 - 冪等: 前回成功runのwatermark以降のみ処理。途中失敗しても翌晩に追いつく
 - 成功時は無通知、失敗時のみstderr(→nightly.log)に残す
 """
+import hashlib
 import json
 import os
 import re
@@ -20,7 +21,9 @@ SYSTEM_DIR = Path("/volume2/claude-system")
 REPO_DIR = Path.home() / "claude-config"
 INDEX_MAX_LINES = 150          # 設計書§6.1-4(実測で調整)
 TURN_SNIPPET_CHARS = 1500      # 1ターンあたりの最大文字数
-PROJECT_BUDGET_CHARS = 80_000  # 1プロジェクトあたりのプロンプト上限
+PROJECT_BUDGET_CHARS = 80_000  # verify 1回あたりのturnsプロンプト上限
+MEMORY_BUDGET_CHARS = 20_000   # verify 1回あたりのauto memoryプロンプト上限
+FETCH_LIMIT = 300              # 1クエリで取るturns行数
 CLAUDE_TIMEOUT = 600           # claude 1呼び出しの上限秒
 
 GIT_ENV = ["-c", "user.name=nightly-batch", "-c", "user.email=nightly@nas.local"]
@@ -42,7 +45,10 @@ def psql(sql: str) -> str:
 def psql_json(sql: str):
     """SELECT json_agg(...) 系の結果をPythonオブジェクトで返す。"""
     out = psql(sql)
-    return json.loads(out) if out else []
+    if not out:
+        return []
+    obj = json.loads(out)
+    return obj if obj is not None else []  # json_aggは対象0行でSQL nullを返す
 
 
 def q(s: str) -> str:
@@ -158,26 +164,98 @@ def log(msg: str):
     print(msg, flush=True)
 
 
+def reset_repo():
+    """配布リポジトリを未pushのcommit・作業ツリー変更ごとupstreamへ戻す。"""
+    subprocess.run(["git", "-C", str(REPO_DIR), "reset", "--hard", "-q", "@{u}"],
+                   check=True, capture_output=True, timeout=60)
+    subprocess.run(["git", "-C", str(REPO_DIR), "clean", "-qfd", "--", "memory"],
+                   check=True, capture_output=True, timeout=60)
+
+
 def fail(run_id, msg: str):
     print(f"FAILED: {msg}", file=sys.stderr, flush=True)
     if run_id:
-        psql(f"UPDATE batch_runs SET finished_at=now(), status='failed', notes={q(msg[:500])} WHERE id={run_id};")
+        # 補償: このrunの部分書き込み(facts・未pushの配布物)を破棄し、
+        # watermarkが進まないまま翌晩やり直しても重複挿入されないようにする
+        compensations = (
+            ("facts", lambda: psql(f"DELETE FROM facts WHERE created_by={q('run-' + str(run_id))};")),
+            ("repo", reset_repo),
+            ("batch_runs", lambda: psql(
+                f"UPDATE batch_runs SET finished_at=now(), status='failed', "
+                f"notes={q(msg[:500])} WHERE id={run_id};")),
+        )
+        for label, action in compensations:
+            try:
+                action()
+            except Exception as exc:
+                print(f"FAILED (compensation {label}): {exc}", file=sys.stderr, flush=True)
     sys.exit(1)
 
 
 def project_dir_name(project_key: str) -> str:
     """project_key → memory/配下のディレクトリ名(パス安全化)"""
-    return re.sub(r"[^A-Za-z0-9._-]", "-", project_key).strip("-") or "unknown"
+    safe = re.sub(r"[^A-Za-z0-9._-]", "-", project_key).strip("-")
+    if safe == project_key:
+        return safe or "unknown"
+    # 置換で別キー同士('a/b'と'a-b'等)が同名に潰れないよう元キーのハッシュで一意化
+    return f"{safe or 'unknown'}-{hashlib.sha1(project_key.encode()).hexdigest()[:8]}"
+
+
+def fetch_turns(project: str, lo: int, hi: int) -> list:
+    """id が (lo, hi] のturnsを昇順で全件取得(keysetページング)。
+
+    上限hiで固定するのが冪等性の要: run中に到着した行は次回に回る。
+    """
+    rows: list = []
+    last_id = lo
+    while True:
+        batch = psql_json(
+            f"SELECT json_agg(json_build_object('id', id, 'role', role, 'content', content) ORDER BY id) "
+            f"FROM (SELECT id, role, content FROM turns "
+            f"WHERE project_key={q(project)} AND id > {last_id} AND id <= {hi} "
+            f"ORDER BY id LIMIT {FETCH_LIMIT}) t;"
+        )
+        if not batch:
+            return rows
+        rows.extend(batch)
+        last_id = batch[-1]["id"]
+
+
+def make_chunks(turns: list, memories: list) -> list:
+    """プロンプト予算に収まる (turns, memories) の組へ分割する。
+
+    切り詰めではなく分割にすることで、watermarkが指す範囲の全行が必ずverifyを通る。
+    """
+    def split(items, budget, cost):
+        chunks = [[]]
+        size = 0
+        for item in items:
+            c = cost(item)
+            if chunks[-1] and size + c > budget:
+                chunks.append([])
+                size = 0
+            chunks[-1].append(item)
+            size += c
+        return chunks
+
+    turn_chunks = split(turns, PROJECT_BUDGET_CHARS,
+                        lambda t: min(len(t["content"]), TURN_SNIPPET_CHARS) + 40)
+    mem_chunks = split(memories, MEMORY_BUDGET_CHARS,
+                       lambda m: min(len(m["content"]), TURN_SNIPPET_CHARS) + len(m["file_path"]) + 10)
+    n = max(len(turn_chunks), len(mem_chunks))
+    turn_chunks += [[]] * (n - len(turn_chunks))
+    mem_chunks += [[]] * (n - len(mem_chunks))
+    return list(zip(turn_chunks, mem_chunks))
 
 
 def verify_project(project: str, turns: list, memories: list, run_id: int):
     turn_ids = {t["id"] for t in turns}
     turns_text = "\n".join(
         f"[{t['id']}] {t['role']}: {t['content'][:TURN_SNIPPET_CHARS]}" for t in turns
-    )[:PROJECT_BUDGET_CHARS]
+    ) or "(なし)"
     mem_text = "\n---\n".join(
         f"({m['file_path']})\n{m['content'][:TURN_SNIPPET_CHARS]}" for m in memories
-    )[:20_000] or "(なし)"
+    ) or "(なし)"
 
     out = ask_claude(
         VERIFY_PROMPT.format(project=project, turns=turns_text, memories=mem_text),
@@ -289,26 +367,26 @@ def main():
 
         projects = [r["k"] for r in psql_json(
             f"SELECT json_agg(json_build_object('k', k)) FROM ("
-            f"SELECT DISTINCT project_key AS k FROM turns WHERE id > {wm_turn} "
-            f"UNION SELECT DISTINCT project_key FROM auto_memory_snapshots WHERE id > {wm_snap}) s;"
+            f"SELECT DISTINCT project_key AS k FROM turns WHERE id > {wm_turn} AND id <= {max_turn} "
+            f"UNION SELECT DISTINCT project_key FROM auto_memory_snapshots "
+            f"WHERE id > {wm_snap} AND id <= {max_snap}) s;"
         )]
         log(f"run {run_id}: turns {wm_turn}->{max_turn}, snapshots {wm_snap}->{max_snap}, projects: {projects}")
 
         total_inserted = total_dropped = 0
         touched_keys = set()
         for project in projects:
-            turns = psql_json(
-                f"SELECT json_agg(json_build_object('id', id, 'role', role, 'content', content) ORDER BY id) "
-                f"FROM (SELECT id, role, content FROM turns "
-                f"WHERE project_key={q(project)} AND id > {wm_turn} ORDER BY id DESC LIMIT 300) t;"
-            ) or []
+            turns = fetch_turns(project, wm_turn, max_turn)
             memories = psql_json(
                 f"SELECT json_agg(json_build_object('file_path', file_path, 'content', content) ORDER BY id) "
-                f"FROM auto_memory_snapshots WHERE project_key={q(project)} AND id > {wm_snap};"
-            ) or []
+                f"FROM auto_memory_snapshots WHERE project_key={q(project)} "
+                f"AND id > {wm_snap} AND id <= {max_snap};"
+            )
             if not turns and not memories:
                 continue
-            candidates = verify_project(project, turns, memories, run_id)
+            candidates = []
+            for turn_chunk, mem_chunk in make_chunks(turns, memories):
+                candidates += verify_project(project, turn_chunk, mem_chunk, run_id)
             log(f"  {project}: {len(turns)} turns, {len(memories)} memories -> {len(candidates)} candidates")
             if not candidates:
                 continue
@@ -337,7 +415,8 @@ def main():
                 subprocess.run(["git", "-C", str(REPO_DIR), "push", "-q"], check=True, timeout=120)
                 log("  pushed")
 
-        turns_processed = int(psql(f"SELECT count(*) FROM turns WHERE id > {wm_turn};"))
+        turns_processed = int(psql(
+            f"SELECT count(*) FROM turns WHERE id > {wm_turn} AND id <= {max_turn};"))
         psql(f"UPDATE batch_runs SET finished_at=now(), status='success', "
              f"turns_processed={turns_processed}, candidates_dropped={total_dropped}, "
              f"index_lines={index_lines}, watermark_turn_id={max_turn}, "

@@ -9,7 +9,7 @@
 set -u
 
 : "${NAS_IP:?環境変数 NAS_IP を設定してください (例: NAS_IP=192.168.x.x $0)}"
-INGEST_URL="http://${NAS_IP}:8800"
+INGEST_URL="https://${NAS_IP}:8800"
 CONFIG_DIR="$HOME/claude-config"
 CLAUDE_DIR="$HOME/.claude"
 SPOOL_DIR="$HOME/.claude-spool"
@@ -52,13 +52,30 @@ json.dump(settings, open(settings_path, "w"), indent=2, ensure_ascii=False)
 print("  settings.json: hooks設定を確認/追記")
 PYEOF
 
-# 3. スプール設定(APIトークン)
+# 3. ingest TLS証明書のピン止め(trust-on-first-use。fingerprintをNAS側と目視照合する)
+CERT_FILE="$SPOOL_DIR/ingest_cert.pem"
+if [ ! -f "$CERT_FILE" ]; then
+    if command -v openssl >/dev/null \
+        && openssl s_client -connect "${NAS_IP}:8800" </dev/null 2>/dev/null \
+           | openssl x509 > "$CERT_FILE" 2>/dev/null; then
+        echo "  ingest証明書を取得。NAS側 gen_tls_cert.sh の出力とfingerprintを照合してください:"
+        openssl x509 -in "$CERT_FILE" -noout -fingerprint -sha256 | sed 's/^/    /'
+    else
+        rm -f "$CERT_FILE"
+        echo "  WARN: ingest証明書を取得できませんでした(NASのingest未起動?)。起動後に再実行してください"
+    fi
+fi
+
+# 4. スプール設定(APIトークン: 画面にもargvにも出さない)
 if [ ! -f "$SPOOL_DIR/config.json" ]; then
-    printf "  NAS ingest APIトークンを入力: "
-    read -r TOKEN
-    python3 - "$SPOOL_DIR/config.json" "$INGEST_URL" "$TOKEN" <<'PYEOF'
-import json, sys
-json.dump({"ingest_url": sys.argv[2], "api_token": sys.argv[3]}, open(sys.argv[1], "w"))
+    printf "  NAS ingest APIトークンを入力(非表示): "
+    read -rs TOKEN
+    echo
+    umask 077
+    TOKEN="$TOKEN" python3 - "$SPOOL_DIR/config.json" "$INGEST_URL" "$CERT_FILE" <<'PYEOF'
+import json, os, sys
+json.dump({"ingest_url": sys.argv[2], "api_token": os.environ["TOKEN"],
+           "tls_cert": sys.argv[3]}, open(sys.argv[1], "w"))
 PYEOF
     chmod 600 "$SPOOL_DIR/config.json"
     echo "  config.json 作成"
@@ -66,7 +83,7 @@ else
     echo "  config.json は既存(スキップ)"
 fi
 
-# 4. senderの定期実行(1時間おき)
+# 5. senderの定期実行(1時間おき)
 case "$(uname -s)" in
 Darwin)
     PLIST="$HOME/Library/LaunchAgents/com.claude.spool-sender.plist"
@@ -94,7 +111,7 @@ Linux)
     ;;
 esac
 
-# 5. ユーザーレベルCLAUDE.mdへの@import(設計書§7)
+# 6. ユーザーレベルCLAUDE.mdへの@import(設計書§7)
 USER_MD="$CLAUDE_DIR/CLAUDE.md"
 IMPORT_LINE="@~/claude-config/memory/general/index.md"
 if ! grep -qF "$IMPORT_LINE" "$USER_MD" 2>/dev/null; then

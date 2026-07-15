@@ -74,14 +74,25 @@ def mask_text(text: str) -> str:
     return text
 
 
+_SENSITIVE_KEYS = {"password", "passwd", "pwd"}
+
+
 def mask_value(value: Any) -> Any:
-    """JSON構造を再帰的に辿り、全文字列にマスクを適用する。"""
+    """JSON構造を再帰的に辿り、全文字列にマスクを適用する。
+
+    正規表現(値の形式ベース)に加え、JSONキーが認証情報を示す場合は値を形式に関係なく潰す。
+    """
     if isinstance(value, str):
         return mask_text(value)
     if isinstance(value, list):
         return [mask_value(v) for v in value]
     if isinstance(value, dict):
-        return {k: mask_value(v) for k, v in value.items()}
+        return {
+            k: "[REDACTED:password-key]"
+            if isinstance(v, str) and k.lower() in _SENSITIVE_KEYS
+            else mask_value(v)
+            for k, v in value.items()
+        }
     return value
 
 
@@ -205,49 +216,25 @@ async def ingest(request: Request) -> dict:
     # 1. マスクを適用してから生保存(生JSONにも秘密は残さない — §8.1)
     payload = mask_value(payload)
     device = payload.get("device", "unknown")
+    event_id = payload.get("event_id")
+    event_id = str(event_id)[:100] if event_id else None
 
     with pool.connection() as conn:
-        payload_id = conn.execute(
-            "INSERT INTO raw_payloads (device, kind, payload) VALUES (%s, %s, %s) RETURNING id",
-            (device, kind, Json(payload)),
-        ).fetchone()[0]
+        # 端末生成のevent_idで再送(at-least-once)を重複排除。event_id無しの旧形式は素通し
+        row = conn.execute(
+            "INSERT INTO raw_payloads (device, kind, payload, event_id) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (event_id) DO NOTHING RETURNING id",
+            (device, kind, Json(payload), event_id),
+        ).fetchone()
+        if row is None:
+            return {"duplicate": True, "event_id": event_id}
+        payload_id = row[0]
 
-        # 2. パース → 冪等INSERT
+        # 2. パース → 冪等INSERT。セーブポイントで分離し、
+        #    内側のDBエラーが raw_payloads の保存と parse_error 記録を巻き込まないようにする
         try:
-            if kind == "transcript":
-                rows = parse_transcript(payload, payload_id)
-                inserted = 0
-                for r in rows:
-                    cur = conn.execute(
-                        """
-                        INSERT INTO turns (device, project_key, session_id, message_uuid,
-                                           role, content, ts, cwd, git_branch, model, payload_id)
-                        VALUES (%(device)s, %(project_key)s, %(session_id)s, %(message_uuid)s,
-                                %(role)s, %(content)s, %(ts)s, %(cwd)s, %(git_branch)s,
-                                %(model)s, %(payload_id)s)
-                        ON CONFLICT (session_id, message_uuid) DO NOTHING
-                        """,
-                        r,
-                    )
-                    inserted += cur.rowcount
-                result = {"payload_id": payload_id, "parsed": len(rows), "inserted": inserted}
-            else:  # auto_memory
-                cur = conn.execute(
-                    """
-                    INSERT INTO auto_memory_snapshots (device, project_key, file_path, content, file_mtime)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (device, file_path, file_mtime) DO NOTHING
-                    """,
-                    (
-                        device,
-                        normalize_project_key(payload.get("git_remote_url"), payload.get("project_dir")),
-                        payload.get("file_path", "unknown"),
-                        payload.get("content", ""),
-                        payload.get("file_mtime"),
-                    ),
-                )
-                result = {"payload_id": payload_id, "inserted": cur.rowcount}
-            conn.execute("UPDATE raw_payloads SET parsed_at = now() WHERE id = %s", (payload_id,))
+            with conn.transaction():
+                result = _parse_and_insert(conn, kind, payload, payload_id)
         except Exception as exc:  # パース失敗はrawに記録して200(データは失われていない)
             conn.execute(
                 "UPDATE raw_payloads SET parse_error = %s WHERE id = %s",
@@ -255,4 +242,43 @@ async def ingest(request: Request) -> dict:
             )
             result = {"payload_id": payload_id, "parse_error": str(exc)[:200]}
 
+    return result
+
+
+def _parse_and_insert(conn, kind: str, payload: dict, payload_id: int) -> dict:
+    device = payload.get("device", "unknown")
+    if kind == "transcript":
+        rows = parse_transcript(payload, payload_id)
+        inserted = 0
+        for r in rows:
+            cur = conn.execute(
+                """
+                INSERT INTO turns (device, project_key, session_id, message_uuid,
+                                   role, content, ts, cwd, git_branch, model, payload_id)
+                VALUES (%(device)s, %(project_key)s, %(session_id)s, %(message_uuid)s,
+                        %(role)s, %(content)s, %(ts)s, %(cwd)s, %(git_branch)s,
+                        %(model)s, %(payload_id)s)
+                ON CONFLICT (session_id, message_uuid) DO NOTHING
+                """,
+                r,
+            )
+            inserted += cur.rowcount
+        result = {"payload_id": payload_id, "parsed": len(rows), "inserted": inserted}
+    else:  # auto_memory
+        cur = conn.execute(
+            """
+            INSERT INTO auto_memory_snapshots (device, project_key, file_path, content, file_mtime)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (device, file_path, file_mtime) DO NOTHING
+            """,
+            (
+                device,
+                normalize_project_key(payload.get("git_remote_url"), payload.get("project_dir")),
+                payload.get("file_path", "unknown"),
+                payload.get("content", ""),
+                payload.get("file_mtime"),
+            ),
+        )
+        result = {"payload_id": payload_id, "inserted": cur.rowcount}
+    conn.execute("UPDATE raw_payloads SET parsed_at = now() WHERE id = %s", (payload_id,))
     return result

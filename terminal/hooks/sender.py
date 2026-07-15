@@ -6,6 +6,7 @@ NAS到達不能時は静かに諦める(スプールに残ることが記録)。
 """
 import fcntl
 import json
+import ssl
 import sys
 import time
 import urllib.request
@@ -22,6 +23,14 @@ def main():
     cfg = json.loads(CONFIG.read_text())
     url = cfg["ingest_url"].rstrip("/") + "/ingest"
     token = cfg["api_token"]
+
+    # ingestは自己署名TLS: setup.shがピン止めした証明書(tls_cert)で検証する。
+    # 証明書が無ければシステムストアで検証され、失敗した分はスプールに残って次回再送
+    ctx = None
+    if url.startswith("https"):
+        cert = cfg.get("tls_cert")
+        cafile = cert if cert and Path(cert).exists() else None
+        ctx = ssl.create_default_context(cafile=cafile)
 
     pending = SPOOL / "pending"
     sent = SPOOL / "sent"
@@ -46,7 +55,7 @@ def main():
                     "Authorization": f"Bearer {token}",
                 },
             )
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
                 if resp.status == 200:
                     f.rename(sent / f.name)
                 else:

@@ -15,7 +15,7 @@ jobs:
         run: python3 -m compileall -q terminal nas
 
       - name: shellcheck
-        run: shellcheck -S warning terminal/hooks/*.sh terminal/setup/*.sh nas/batch/*.sh
+        run: shellcheck -S warning terminal/hooks/*.sh terminal/setup/*.sh nas/batch/*.sh nas/ingest/*.sh
 
       - name: JSON / テンプレートの妥当性
         run: |
@@ -36,4 +36,6 @@ jobs:
           mkdir -p nas/ingest/secrets
           printf dummy > nas/ingest/secrets/api_token
           printf dummy > nas/ingest/secrets/db_password
+          printf dummy > nas/ingest/secrets/tls_cert.pem
+          printf dummy > nas/ingest/secrets/tls_key.pem
           docker compose -f nas/docker-compose.yml config -q
