@@ -476,15 +476,21 @@ def main():
 
 # ---------------------------------------------------------------- 初回データ移行(追補設計書)
 
-def init_watermark():
+def init_watermark(force: bool = False):
     """バックフィル投入後に一度だけ実行: 既存データを定常バッチの対象外にする(追補設計書§2)。
 
     過去分は --backfill-distill が別途蒸留する。
+    定常バッチが既に動いている環境へ後からバックフィルする場合は --force を付ける
+    (現時点までのIDをまとめて対象外にするため、直近の未処理分も定常バッチから外れる。
+    その分もbackfill-distillが拾う)。
     """
-    if int(psql("SELECT count(*) FROM batch_runs WHERE status='success';")) > 0:
-        print("FAILED: 既にsuccess runが存在します。--init-watermark は定常バッチ稼働前に"
-              "一度だけ実行できます(後から適用するとwatermarkが飛び、未処理データを"
-              "スキップする恐れがあります)", file=sys.stderr)
+    if int(psql("SELECT count(*) FROM batch_runs WHERE notes='watermark-init';")) > 0:
+        print("FAILED: watermark-init は適用済みです", file=sys.stderr)
+        sys.exit(1)
+    if not force and int(psql("SELECT count(*) FROM batch_runs WHERE status='success';")) > 0:
+        print("FAILED: 既にsuccess runが存在します(定常バッチが稼働済み)。"
+              "watermarkを現時点まで進めてよければ --force を付けて再実行してください",
+              file=sys.stderr)
         sys.exit(1)
     max_turn = int(psql("SELECT coalesce(max(id),0) FROM turns;"))
     max_snap = int(psql("SELECT coalesce(max(id),0) FROM auto_memory_snapshots;"))
@@ -495,9 +501,16 @@ def init_watermark():
 
 
 def backfill_boundary():
-    """バックフィル対象の上限ID = 最初の成功run(watermark-init)のwatermark。"""
+    """バックフィル対象の上限ID = watermark-init runのwatermark。
+
+    watermark-init が無い環境(旧手順)では最初の成功runで代用する。
+    """
     row = psql("SELECT coalesce(watermark_turn_id,0), coalesce(watermark_snapshot_id,0) "
-               "FROM batch_runs WHERE status='success' ORDER BY id LIMIT 1;")
+               "FROM batch_runs WHERE status='success' AND notes='watermark-init' "
+               "ORDER BY id LIMIT 1;")
+    if not row:
+        row = psql("SELECT coalesce(watermark_turn_id,0), coalesce(watermark_snapshot_id,0) "
+                   "FROM batch_runs WHERE status='success' ORDER BY id LIMIT 1;")
     if not row:
         return None
     t, s = row.split("|")
@@ -675,10 +688,10 @@ if __name__ == "__main__":
     if not argv:
         main()
     elif argv[0] == "--init-watermark":
-        init_watermark()
+        init_watermark(force="--force" in argv[1:])
     elif argv[0] == "--backfill-distill":
         backfill_main(int(argv[1]) if len(argv) > 1 else 2)
     else:
-        print("usage: nightly.py [--init-watermark | --backfill-distill [チャンク数/晩]]",
+        print("usage: nightly.py [--init-watermark [--force] | --backfill-distill [チャンク数/晩]]",
               file=sys.stderr)
         sys.exit(2)
