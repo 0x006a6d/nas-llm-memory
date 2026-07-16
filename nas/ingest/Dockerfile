@@ -6,7 +6,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py redact_patterns.json ./
 
-# 公開APIをrootで動かさない(アプリはファイル書き込み不要なのでchownも不要)
+# 公開APIをrootで動かさない(アプリはファイル書き込み不要なのでchownも不要)。
+# compose 側は user: ${INGEST_UID} でさらに上書きする(file secretsが
+# ホスト権限のままマウントされるため、所有uidと一致させる必要がある)
 RUN useradd --system --no-create-home app
 USER app
 

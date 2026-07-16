@@ -49,7 +49,7 @@
 
 ## セットアップ概要
 
-NAS 側: `nas/` を配置し、`ingest/secrets/` に `api_token` と `db_password` を置き (600)、`ingest/gen_tls_cert.sh <NASのIP>` で TLS 証明書を生成、`nas/.env` に `INGEST_BIND_IP=<NASのLAN IP>` を書いてから `docker compose up -d`。スキーマは番号順に適用する (`002_pgroonga.sql` は PGroonga で全文検索する場合のみ):
+NAS 側: `nas/` を配置し、`ingest/secrets/` に `api_token` と `db_password` を置き (600)、`ingest/gen_tls_cert.sh <NASのIP>` で TLS 証明書を生成、`nas/.env` に `INGEST_BIND_IP=<NASのLAN IP>` と `INGEST_UID=<secrets の所有 uid (通常 id -u)>` を書いてから `docker compose up -d`。スキーマは番号順に適用する (`002_pgroonga.sql` は PGroonga で全文検索する場合のみ):
 
 ```bash
 cd nas
