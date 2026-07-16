@@ -1,0 +1,57 @@
+services:
+  db:
+    image: groonga/pgroonga:latest-alpine-17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: claude_memory
+      POSTGRES_USER: claude
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    volumes:
+      - /volume2/claude-system/db:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:15432:5432"   # ホスト内のみ。LAN公開しない(5432はUGOS内蔵PostgreSQLが使用中)
+    secrets:
+      - db_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claude -d claude_memory"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ingest:
+    build: ./ingest
+    restart: unless-stopped
+    # 自己署名TLSで終端(証明書は ingest/gen_tls_cert.sh で生成)。
+    # 平文HTTPだとBearerトークンと全ペイロードがLAN上で盗聴・改ざんできてしまう
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8800",
+              "--ssl-certfile", "/run/secrets/tls_cert",
+              "--ssl-keyfile", "/run/secrets/tls_key"]
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: claude_memory
+      DB_USER: claude
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      API_TOKEN_FILE: /run/secrets/api_token
+    ports:
+      # LAN内の各端末からPOSTを受ける(HTTPS)。全インターフェース公開を避けるため
+      # バインド先IPは必須: nas/.env に INGEST_BIND_IP=<NASのLAN IP> を書く
+      - "${INGEST_BIND_IP:?nas/.env に INGEST_BIND_IP=<NASのLAN IP> を設定}:8800:8800"
+    depends_on:
+      db:
+        condition: service_healthy
+    secrets:
+      - db_password
+      - api_token
+      - tls_cert
+      - tls_key
+
+secrets:
+  db_password:
+    file: ./ingest/secrets/db_password
+  api_token:
+    file: ./ingest/secrets/api_token
+  tls_cert:
+    file: ./ingest/secrets/tls_cert.pem
+  tls_key:
+    file: ./ingest/secrets/tls_key.pem

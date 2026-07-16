@@ -1,0 +1,12 @@
+[
+  {"name": "aws-access-key",  "pattern": "AKIA[0-9A-Z]{16}"},
+  {"name": "aws-secret-key",  "pattern": "(?i)aws_secret_access_key\\s*[=:]\\s*[\"']?[A-Za-z0-9/+=]{40}[\"']?"},
+  {"name": "anthropic-key",   "pattern": "sk-ant-[A-Za-z0-9_-]{20,}"},
+  {"name": "openai-key",      "pattern": "sk-[A-Za-z0-9_-]{20,}"},
+  {"name": "github-token",    "pattern": "gh[pousr]_[A-Za-z0-9]{36,}"},
+  {"name": "github-pat",      "pattern": "github_pat_[A-Za-z0-9_]{22,}"},
+  {"name": "slack-token",     "pattern": "xox[baprs]-[A-Za-z0-9-]{10,}"},
+  {"name": "bearer-header",   "pattern": "(?i)(authorization\\s*:\\s*bearer\\s+)[A-Za-z0-9._~+/=-]{8,}"},
+  {"name": "private-key-pem", "pattern": "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----"},
+  {"name": "password-assign", "pattern": "(?i)([\"']?(?:password|passwd|pwd)[\"']?\\s*[=:]\\s*)(?:\"(?:\\\\.|[^\"\\\\])+\"|'(?:\\\\.|[^'\\\\])+'|[^\\s\"',;]+)"}
+]

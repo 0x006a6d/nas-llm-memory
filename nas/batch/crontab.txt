@@ -1,0 +1,18 @@
+# NASホスト(NAS_USER)のcrontab — 復元用マスター(手順書§7)
+# NAS_USER は deploy_nas_batch.sh が配置時に実行ユーザーへ展開するプレースホルダー
+# UGOSアップデートでcrontabが消えた場合: crontab /volume2/claude-system/batch/crontab.txt
+# (deploy_nas_batch.sh がリポジトリの nas/batch/ からこの場所へ配置する)
+# 注意: UGOSの自動メンテナンス(SMART検査等)の時間帯と重ねないこと
+
+# 夜間統合バッチ(設計書§6)
+30 3 * * *  /volume2/claude-system/batch/nightly.sh >> /volume2/claude-system/batch/nightly.log 2>&1
+
+# DBバックアップ(日次04:30)
+30 4 * * *  /volume2/claude-system/batch/backup.sh
+
+# 初回移行期間のみ有効化(追補設計書§2): 通常バッチ後に過去分を1晩2チャンクずつ蒸留。
+# 全プロジェクトが「backfill完了」になったら行ごと削除する
+#0 5 * * *  /volume2/claude-system/batch/nightly.sh --backfill-distill 2 >> /volume2/claude-system/batch/backfill.log 2>&1
+
+# sender(NAS自身も端末として送信 — 設計書§8)
+17 * * * *  python3 /volume1/homes/NAS_USER/claude-config/hooks/sender.py

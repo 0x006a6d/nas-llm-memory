@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Python 構文チェック
+        run: python3 -m compileall -q terminal nas
+
+      - name: shellcheck
+        run: shellcheck -S warning terminal/hooks/*.sh terminal/setup/*.sh nas/batch/*.sh nas/ingest/*.sh
+
+      - name: JSON / テンプレートの妥当性
+        run: |
+          python3 - <<'EOF'
+          import json, glob, sys
+          files = glob.glob("**/*.json", recursive=True) + ["terminal/templates/settings.json.tmpl"]
+          for f in files:
+              try:
+                  json.load(open(f))
+              except Exception as e:
+                  sys.exit(f"{f}: {e}")
+              print(f"ok: {f}")
+          EOF
+
+      - name: docker compose 構文チェック
+        # compose が secrets ファイルの実在を要求するためダミーを置いてから検証する
+        run: |
+          mkdir -p nas/ingest/secrets
+          printf dummy > nas/ingest/secrets/api_token
+          printf dummy > nas/ingest/secrets/db_password
+          printf dummy > nas/ingest/secrets/tls_cert.pem
+          printf dummy > nas/ingest/secrets/tls_key.pem
+          INGEST_BIND_IP=127.0.0.1 docker compose -f nas/docker-compose.yml config -q
