@@ -22,6 +22,10 @@ def _read_secret(env_name: str) -> str:
     return Path(path).read_text().strip()
 
 
+# 非rootの保証: compose の user: ${INGEST_UID} に 0 を渡されても起動させない
+if hasattr(os, "getuid") and os.getuid() == 0:
+    raise SystemExit("ingest をrootで実行しない: nas/.env の INGEST_UID に非rootのuidを設定する")
+
 DB_PASSWORD = _read_secret("DB_PASSWORD_FILE")
 API_TOKEN = _read_secret("API_TOKEN_FILE")
 
