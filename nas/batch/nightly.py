@@ -676,7 +676,9 @@ def backfill_main(max_chunks: int):
              f"candidates_dropped={total_dropped}, index_lines={index_lines}, "
              f"notes={q(f'backfill-distill chunks={processed} inserted={total_inserted}')} "
              f"WHERE id={run_id};")
-        remaining = sum(1 for s in progress.values() if not s["completed"])
+        # 未完了数は「全プロジェクト」に対して数える(progressには着手済みしか入らないため、
+        # チャンク上限でbreakした未着手分を取りこぼすと完了と誤読される)
+        remaining = sum(1 for p in projects if not progress.get(p, {}).get("completed"))
         log(f"backfill run {run_id}: success (chunks={processed}, facts+{total_inserted}, "
             f"未完了projects={remaining})")
     except Exception as exc:
