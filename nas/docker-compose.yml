@@ -21,6 +21,10 @@ services:
   ingest:
     build: ./ingest
     restart: unless-stopped
+    # 非rootを維持しつつ、ホスト権限のままバインドマウントされるfile secrets
+    # (600・所有者=NASユーザー) を読めるuidで実行する。nas/.env に
+    # INGEST_UID=<ingest/secrets/ の所有uid (通常は id -u)> を設定する
+    user: "${INGEST_UID:?nas/.env に INGEST_UID=<secrets所有者のuid> を設定}"
     # 自己署名TLSで終端(証明書は ingest/gen_tls_cert.sh で生成)。
     # 平文HTTPだとBearerトークンと全ペイロードがLAN上で盗聴・改ざんできてしまう
     command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8800",

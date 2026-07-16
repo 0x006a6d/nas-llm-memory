@@ -43,4 +43,4 @@ jobs:
           printf dummy > nas/ingest/secrets/db_password
           printf dummy > nas/ingest/secrets/tls_cert.pem
           printf dummy > nas/ingest/secrets/tls_key.pem
-          INGEST_BIND_IP=127.0.0.1 docker compose -f nas/docker-compose.yml config -q
+          INGEST_BIND_IP=127.0.0.1 INGEST_UID=1000 docker compose -f nas/docker-compose.yml config -q
