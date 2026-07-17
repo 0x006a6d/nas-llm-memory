@@ -153,6 +153,8 @@ if ! grep -qE '^@.*memory/general/index\.md' "$USER_MD" 2>/dev/null; then
 fi
 
 echo "== 完了 =="
-echo "プロジェクトごとのindex注入は、各プロジェクトのCLAUDE.mdに"
-echo "  @$CONFIG_DIR/memory/<project-key>/index.md"
-echo "を追記してください(indexは夜間バッチが生成した時点から有効)"
+echo "プロジェクトごとのindex注入(両エージェント統合・Codex追補§3.2)は、プロジェクトごとに"
+echo "  python3 $CONFIG_DIR/hooks/agents_sync.py register <project-dir>"
+echo "を実行してください(AGENTS.override.md が生成され、CodexとClaude Code両方が読む。"
+echo "Claude Code側はプロジェクトCLAUDE.mdに @AGENTS.override.md を追記、"
+echo "手書き指示はAGENTS.mdへ一本化。indexは夜間バッチが生成した時点から有効)"

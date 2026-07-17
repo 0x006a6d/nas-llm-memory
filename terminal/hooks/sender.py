@@ -142,9 +142,9 @@ def spool_codex():
         # 末尾の改行未達の行は書きかけの可能性があるため次回に回す
         full_lines = all_lines if text.endswith("\n") else all_lines[:-1]
 
-        # rollout冒頭のsession_meta(通常1行目)からcwdとセッションIDを読む。
-        # cwdは除外判定(§8.3)、IDは増分チャンク(meta行を含まない)の帰属に使う
-        cwd = meta_id = None
+        # rollout冒頭のsession_meta(通常1行目)からcwd・セッションID・originatorを読む。
+        # cwdは除外判定(§8.3)、IDとoriginatorは増分チャンク(meta行を含まない)の帰属に使う
+        cwd = meta_id = originator = None
         for line in full_lines[:200]:
             try:
                 obj = json.loads(line)
@@ -153,6 +153,7 @@ def spool_codex():
             if obj.get("type") == "session_meta" and not meta_id:
                 p = obj.get("payload") or {}
                 meta_id = p.get("id") or p.get("session_id")
+                originator = p.get("originator")
             if obj.get("type") in ("session_meta", "turn_context") and not cwd:
                 cwd = (obj.get("payload") or {}).get("cwd")
             if cwd and meta_id:
@@ -207,6 +208,7 @@ def spool_codex():
                     "event_id": event_id,
                     "session_id": f.stem,   # ingest側パーサがsession_metaのidを優先する
                     "codex_session_id": meta_id,  # チャンクにmeta行が無いときの帰属先
+                    "originator": originator,  # どの入口か(codex-tui / codex_exec / Codex Desktop / Claude Code)
                     "line_offset": start,   # このチャンクの先頭行番号(0始まり)
                     "context_model": ctx_model,  # チャンク開始時点の最新turn_context
                     "context_cwd": ctx_cwd,
@@ -272,10 +274,12 @@ def main():
         spool_codex()
     except Exception:
         pass
-    # general indexを ~/.codex/AGENTS.md の管理セクションへ配布(Codex追補§3.1)
+    # indexの配布(Codex追補§3): general→~/.codex/AGENTS.md、
+    # 登録済みプロジェクト→<project>/AGENTS.override.md
     try:
         if agents_sync is not None:
             agents_sync.update_global_agents(CONFIG_DIR)
+            agents_sync.update_project_agents(CONFIG_DIR)
     except Exception:
         pass
 

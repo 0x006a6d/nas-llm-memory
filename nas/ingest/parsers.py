@@ -87,6 +87,7 @@ def parse_transcript(payload: dict, payload_id: int) -> list[dict]:
             "model": message.get("model"),
             "payload_id": payload_id,
             "agent": "claude-code",
+            "originator": None,  # originatorはCodex rollout固有(追補§2.3)
         })
     return rows
 
@@ -134,6 +135,9 @@ def parse_codex_rollout(payload: dict, payload_id: int) -> list[dict]:
     session_id = payload.get("codex_session_id")
     cwd = payload.get("context_cwd") or payload.get("project_dir")
     model = payload.get("context_model")
+    # どの入口で使ったか(codex-tui / codex_exec / Codex Desktop / Claude Code)。
+    # チャンクにmeta行が無い場合に備えsender同梱値を初期値にする(追補§2.3)
+    originator = payload.get("originator")
     try:
         line_offset = int(payload.get("line_offset") or 0)
     except (TypeError, ValueError):
@@ -153,6 +157,7 @@ def parse_codex_rollout(payload: dict, payload_id: int) -> list[dict]:
         if ltype == "session_meta":
             session_id = session_id or p.get("id") or p.get("session_id")
             cwd = p.get("cwd") or cwd
+            originator = p.get("originator") or originator
             continue
         if ltype == "turn_context":
             model = p.get("model") or model
@@ -203,5 +208,6 @@ def parse_codex_rollout(payload: dict, payload_id: int) -> list[dict]:
             "model": model,
             "payload_id": payload_id,
             "agent": "codex",
+            "originator": originator,
         })
     return rows

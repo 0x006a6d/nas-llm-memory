@@ -475,10 +475,14 @@ def main():
         # agent別のturns内訳(Codex追補§4: どちらのエージェント由来の知識が多いかの計測)。
         # 計測は本筋ではない: publish後にrunを失敗へ倒さないよう失敗は握りつぶす
         try:
+            # originator付き内訳(例: codex[Claude Code]:12 codex[Codex Desktop]:34)。
+            # Claude Code経由のCodexセッション(二重計上あり得る分)を集計上で識別する(追補§7)
             agents = psql(
-                f"SELECT string_agg(agent || ':' || n, ' ') FROM "
-                f"(SELECT agent, count(*) AS n FROM turns "
-                f" WHERE id > {wm_turn} AND id <= {max_turn} GROUP BY agent ORDER BY agent) a;")
+                f"SELECT string_agg(a || ':' || n, ' ') FROM "
+                f"(SELECT agent || CASE WHEN originator IS NULL OR originator = '' "
+                f"        THEN '' ELSE '[' || originator || ']' END AS a, count(*) AS n "
+                f" FROM turns WHERE id > {wm_turn} AND id <= {max_turn} "
+                f" GROUP BY 1 ORDER BY 1) t;")
         except Exception:
             agents = None  # agent列が未適用(schema 006前)でも本筋は続行
         notes = (f"inserted={total_inserted} projects={len(projects)}"
