@@ -33,6 +33,7 @@ CONFIG = SPOOL / "config.json"
 CONFIG_DIR = Path(__file__).resolve().parent.parent  # ~/claude-config
 SENT_KEEP_DAYS = 14   # 障害復旧用にsentを保持(設計書§10 P0)
 CODEX_MIN_AGE = 300   # 書きかけrollout回避: mtimeが5分以上前のみ送る(Codex追補§2.1)
+CODEX_CHUNK_BYTES = 8_000_000  # 1ペイロードに含める行データの上限(巨大rolloutを分割)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -88,8 +89,14 @@ def spool_codex():
 
     ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl のうち未送信/更新分を
     スプール形式に包んでpendingへ置く(送信は通常の送信ループに任せる)。
-    送信済みは (パス, サイズ, mtime) を codex-sent.jsonl に記録して差分だけ包む。
-    resume等でファイルが伸びたら全体を再送し、重複はDB側UNIQUEが吸収する。
+
+    増分送信: rolloutはappend-onlyなので、送信済み行数を codex-sent.jsonl に
+    記録し、新しい完全行(改行で終わった行)だけを line_offset 付きで送る。
+    常駐セッションの巨大rolloutを成長のたびに全量再送しないための仕組み。
+    行番号は常にファイル先頭からの絶対番号で、ingest側のID規約
+    (<ファイル名>:L<行番号>)と一致する。1ペイロードはCODEX_CHUNK_BYTESで分割。
+    ファイルが縮んだ場合(ローテーション等)は行0から送り直し、
+    重複はDB側UNIQUEが吸収する。
     """
     if exclude is None:
         return  # 除外判定なしで新規収集経路を動かさない(fail-closed)
@@ -103,7 +110,8 @@ def spool_codex():
         for line in state_path.read_text(encoding="utf-8").splitlines():
             try:
                 r = json.loads(line)
-                state[r["path"]] = (r["size"], r["mtime"])
+                # 旧形式(lines無し)は0扱い: 次に変化したとき一度だけ全量再送になる
+                state[r["path"]] = (r["size"], r["mtime"], r.get("lines", 0))
             except Exception:
                 pass
 
@@ -121,56 +129,78 @@ def spool_codex():
         if now - st.st_mtime < CODEX_MIN_AGE:
             continue  # 書きかけの可能性: 次回以降に回す
         sig = (st.st_size, int(st.st_mtime))
-        if state.get(str(f)) == sig:
+        prev = state.get(str(f))
+        if prev and (prev[0], prev[1]) == sig:
             continue
+        # 縮んだ(ローテーション/書き直し)場合は先頭から送り直す
+        sent_lines = prev[2] if prev and st.st_size >= prev[0] else 0
         try:
             text = f.read_text(errors="replace")
         except Exception:
             continue
-        # rollout冒頭のsession_meta(通常1行目)からcwdを読み、除外判定する(§8.3)。
-        # 見つからない場合に備えturn_contextのcwdも受ける
-        cwd = None
-        for line in text.splitlines()[:200]:
+        all_lines = text.splitlines()
+        # 末尾の改行未達の行は書きかけの可能性があるため次回に回す
+        full_lines = all_lines if text.endswith("\n") else all_lines[:-1]
+
+        # rollout冒頭のsession_meta(通常1行目)からcwdとセッションIDを読む。
+        # cwdは除外判定(§8.3)、IDは増分チャンク(meta行を含まない)の帰属に使う
+        cwd = meta_id = None
+        for line in full_lines[:200]:
             try:
                 obj = json.loads(line)
             except Exception:
                 continue
-            if obj.get("type") in ("session_meta", "turn_context"):
+            if obj.get("type") == "session_meta" and not meta_id:
+                p = obj.get("payload") or {}
+                meta_id = p.get("id") or p.get("session_id")
+            if obj.get("type") in ("session_meta", "turn_context") and not cwd:
                 cwd = (obj.get("payload") or {}).get("cwd")
-                if cwd:
-                    break
+            if cwd and meta_id:
+                break
         remote = _git_remote(cwd) if cwd and Path(cwd).is_dir() else None
         if not exclude.is_excluded(
                 excludes,
                 project_key=exclude.normalize_project_key(remote, cwd),
                 project_dir=cwd):
-            # 決定的event_id: 同じ(ファイル, サイズ, mtime)は再実行しても二重投入されない
-            event_id = "codex-" + hashlib.sha1(
-                f"{device}:{f}:{sig[0]}:{sig[1]}".encode()).hexdigest()
-            payload = json.dumps({
-                "device": device,
-                "kind": "transcript",
-                "agent": "codex",
-                "event_id": event_id,
-                "session_id": f.stem,   # ingest側パーサがsession_metaのidを優先する
-                "project_dir": cwd,
-                "git_remote_url": remote,
-                "git_branch": None,
-                "transcript": text,
-                "client_version": None,
-                "captured_at": _iso(now),
-            }, ensure_ascii=False)
-            tmp = pending / (event_id + ".json.tmp")
-            tmp.write_text(payload, encoding="utf-8")
-            tmp.rename(pending / (event_id + ".json"))
-        state[str(f)] = sig  # 除外分も走査済みとして記録(毎回読み直さない)
+            start = sent_lines
+            while start < len(full_lines):
+                i = start
+                acc = 0
+                while i < len(full_lines) and (acc < CODEX_CHUNK_BYTES or i == start):
+                    acc += len(full_lines[i]) + 1
+                    i += 1
+                # 決定的event_id: 同じ(ファイル, 開始行, サイズ, mtime)は
+                # 再実行しても二重投入されない
+                event_id = "codex-" + hashlib.sha1(
+                    f"{device}:{f}:{start}:{sig[0]}:{sig[1]}".encode()).hexdigest()
+                payload = json.dumps({
+                    "device": device,
+                    "kind": "transcript",
+                    "agent": "codex",
+                    "event_id": event_id,
+                    "session_id": f.stem,   # ingest側パーサがsession_metaのidを優先する
+                    "codex_session_id": meta_id,  # チャンクにmeta行が無いときの帰属先
+                    "line_offset": start,   # このチャンクの先頭行番号(0始まり)
+                    "project_dir": cwd,
+                    "git_remote_url": remote,
+                    "git_branch": None,
+                    "transcript": "\n".join(full_lines[start:i]),
+                    "client_version": None,
+                    "captured_at": _iso(now),
+                }, ensure_ascii=False)
+                tmp = pending / (event_id + ".json.tmp")
+                tmp.write_text(payload, encoding="utf-8")
+                tmp.rename(pending / (event_id + ".json"))
+                start = i
+        # 除外分も走査済みとして記録(毎回読み直さない)
+        state[str(f)] = (sig[0], sig[1], len(full_lines))
         changed = True
 
     if changed:
         tmp = state_path.with_name(state_path.name + ".tmp")
         tmp.write_text("\n".join(
-            json.dumps({"path": p, "size": s, "mtime": m}, ensure_ascii=False)
-            for p, (s, m) in sorted(state.items())) + "\n", encoding="utf-8")
+            json.dumps({"path": p, "size": s, "mtime": m, "lines": n}, ensure_ascii=False)
+            for p, (s, m, n) in sorted(state.items())) + "\n", encoding="utf-8")
         tmp.rename(state_path)
 
 
