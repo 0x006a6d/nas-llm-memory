@@ -15,6 +15,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
+from exclude import is_excluded, load_entries, normalize_project_key
+from parsers import parse_codex_rollout, parse_transcript
+
 # ---------------------------------------------------------------- 設定
 
 def _read_secret(env_name: str) -> str:
@@ -102,99 +105,24 @@ def mask_value(value: Any) -> Any:
     return value
 
 
-# ---------------------------------------------------------------- project_key正規化 (設計原則5)
+# ---------------------------------------------------------------- 収集除外 (§8.3 第二防衛線)
 
-def normalize_project_key(git_remote_url: str | None, project_dir: str | None) -> str:
-    if git_remote_url:
-        key = git_remote_url.strip()
-        key = re.sub(r"^[a-z+]+://", "", key)   # scheme除去
-        key = re.sub(r"^[^@/]+@", "", key)      # user@除去
-        key = key.replace(":", "/")             # scp形式 host:path → host/path
-        key = re.sub(r"\.git$", "", key)
-        key = re.sub(r"/+", "/", key).strip("/")
-        return key.lower()
-    if project_dir:
-        return Path(project_dir).name or "unknown"
-    return "unknown"
+_EXCLUDE_FILE = os.environ.get("SYNC_EXCLUDE_FILE")
+_exclude_cache: tuple[float, list] = (0.0, [])
 
 
-# ---------------------------------------------------------------- transcriptパース
-
-def render_content(message: dict) -> str:
-    """message.content(文字列 or ブロック配列)をテキストに落とす。"""
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return json.dumps(content, ensure_ascii=False) if content is not None else ""
-    parts: list[str] = []
-    for block in content:
-        if not isinstance(block, dict):
-            parts.append(str(block))
-            continue
-        btype = block.get("type")
-        if btype == "text":
-            parts.append(block.get("text", ""))
-        elif btype == "thinking":
-            continue  # thinkingは保存しない
-        elif btype == "tool_use":
-            name = block.get("name", "?")
-            inp = json.dumps(block.get("input", {}), ensure_ascii=False)
-            parts.append(f"[tool_use:{name}] {inp}")
-        elif btype == "tool_result":
-            inner = block.get("content")
-            if isinstance(inner, list):
-                text = "\n".join(
-                    b.get("text", "") for b in inner
-                    if isinstance(b, dict) and b.get("type") == "text"
-                )
-            else:
-                text = inner if isinstance(inner, str) else json.dumps(inner, ensure_ascii=False)
-            parts.append(f"[tool_result] {text}")
-        else:
-            parts.append(json.dumps(block, ensure_ascii=False))
-    return "\n".join(p for p in parts if p)
-
-
-def parse_transcript(payload: dict, payload_id: int) -> list[dict]:
-    """スプールペイロードのtranscript(JSONL文字列)をturns行のリストへ。"""
-    device = payload.get("device", "unknown")
-    session_id = payload.get("session_id") or "unknown"
-    project_key = normalize_project_key(
-        payload.get("git_remote_url"), payload.get("project_dir")
-    )
-    rows: list[dict] = []
-    for line in (payload.get("transcript") or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue  # 壊れた行はスキップ(rawには残っている)
-        if obj.get("type") not in ("user", "assistant"):
-            continue  # summary / system / file-history等は対象外
-        message = obj.get("message") or {}
-        uuid = obj.get("uuid")
-        if not uuid:
-            continue
-        content = render_content(message)
-        if not content:
-            continue
-        rows.append({
-            "device": device,
-            "project_key": project_key,
-            "session_id": obj.get("sessionId") or session_id,
-            "message_uuid": uuid,
-            "role": message.get("role") or obj.get("type"),
-            "content": content,
-            "ts": obj.get("timestamp"),
-            "cwd": obj.get("cwd") or payload.get("project_dir"),
-            "git_branch": obj.get("gitBranch") or payload.get("git_branch"),
-            "model": message.get("model"),
-            "payload_id": payload_id,
-        })
-    return rows
+def exclude_entries() -> list:
+    """sync-exclude.txt のエントリ(mtimeが変わったら再読込)。未設定なら除外なし。"""
+    global _exclude_cache
+    if not _EXCLUDE_FILE:
+        return []
+    try:
+        mtime = os.stat(_EXCLUDE_FILE).st_mtime
+    except OSError:
+        return []  # 配布リポジトリ未マウント等: 第一防衛線(端末側)に任せる
+    if mtime != _exclude_cache[0]:
+        _exclude_cache = (mtime, load_entries(_EXCLUDE_FILE))
+    return _exclude_cache[1]
 
 
 # ---------------------------------------------------------------- エンドポイント
@@ -218,6 +146,21 @@ async def ingest(request: Request) -> dict:
     kind = payload.get("kind", "transcript")
     if kind not in ("transcript", "auto_memory"):
         raise HTTPException(status_code=400, detail=f"unknown kind: {kind}")
+    agent = payload.get("agent", "claude-code")
+    if agent not in ("claude-code", "codex"):
+        raise HTTPException(status_code=400, detail=f"unknown agent: {agent}")
+
+    # 収集除外(§8.3 第二防衛線)。200で応えて何も保存しない:
+    # エラーにすると古い除外リストの端末のスプールが詰まり、後続の送信まで止まるため
+    entries = exclude_entries()
+    if entries and is_excluded(
+        entries,
+        project_key=normalize_project_key(
+            payload.get("git_remote_url"), payload.get("project_dir")),
+        project_dir=payload.get("project_dir"),
+        munged_dir=payload.get("project_dir") if kind == "auto_memory" else None,
+    ):
+        return {"excluded": True}
 
     # 1. マスクを適用してから生保存(生JSONにも秘密は残さない — §8.1)
     payload = mask_value(payload)
@@ -228,9 +171,10 @@ async def ingest(request: Request) -> dict:
     with pool.connection() as conn:
         # 端末生成のevent_idで再送(at-least-once)を重複排除。event_id無しの旧形式は素通し
         row = conn.execute(
-            "INSERT INTO raw_payloads (device, kind, payload, event_id) VALUES (%s, %s, %s, %s) "
+            "INSERT INTO raw_payloads (device, kind, payload, event_id, agent) "
+            "VALUES (%s, %s, %s, %s, %s) "
             "ON CONFLICT (event_id) DO NOTHING RETURNING id",
-            (device, kind, Json(payload), event_id),
+            (device, kind, Json(payload), event_id, agent),
         ).fetchone()
         if row is None:
             return {"duplicate": True, "event_id": event_id}
@@ -254,16 +198,17 @@ async def ingest(request: Request) -> dict:
 def _parse_and_insert(conn, kind: str, payload: dict, payload_id: int) -> dict:
     device = payload.get("device", "unknown")
     if kind == "transcript":
-        rows = parse_transcript(payload, payload_id)
+        parse = parse_codex_rollout if payload.get("agent") == "codex" else parse_transcript
+        rows = parse(payload, payload_id)
         inserted = 0
         for r in rows:
             cur = conn.execute(
                 """
                 INSERT INTO turns (device, project_key, session_id, message_uuid,
-                                   role, content, ts, cwd, git_branch, model, payload_id)
+                                   role, content, ts, cwd, git_branch, model, payload_id, agent)
                 VALUES (%(device)s, %(project_key)s, %(session_id)s, %(message_uuid)s,
                         %(role)s, %(content)s, %(ts)s, %(cwd)s, %(git_branch)s,
-                        %(model)s, %(payload_id)s)
+                        %(model)s, %(payload_id)s, %(agent)s)
                 ON CONFLICT (session_id, message_uuid) DO NOTHING
                 """,
                 r,

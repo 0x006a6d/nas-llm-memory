@@ -13,8 +13,11 @@ import time
 import uuid
 from pathlib import Path
 
+import exclude
+
 SPOOL = Path.home() / ".claude-spool"
 PENDING = SPOOL / "pending"
+CONFIG_DIR = Path(__file__).resolve().parent.parent  # ~/claude-config
 
 
 def git_info(args, cwd):
@@ -46,17 +49,29 @@ def main():
     # 夜間バッチ等の内部claude呼び出しは収集しない(自己増殖ループ防止)
     if os.environ.get("CLAUDE_SPOOL_SKIP") == "1":
         return
+    # アドホック除外(§8.3): このセッションは収集しない
+    if os.environ.get("NAS_MEMORY_DISABLE") == "1":
+        return
     data = json.load(sys.stdin)
     cwd = data.get("cwd") or os.getcwd()
     session_id = data.get("session_id") or "unknown"
     device = socket.gethostname()
     captured_at = iso()
+    excludes = exclude.load_entries(CONFIG_DIR / "sync-exclude.txt")
 
     # --- transcript本体
     transcript = ""
     tp = data.get("transcript_path")
     if tp and Path(tp).exists():
         transcript = Path(tp).read_text(errors="replace")
+    if transcript:
+        # 収集除外(§8.3 第一防衛線): スプールにも書かない=データを端末の外に出さない
+        remote = git_info(["remote", "get-url", "origin"], cwd)
+        if exclude.is_excluded(
+                excludes,
+                project_key=exclude.normalize_project_key(remote, cwd),
+                project_dir=cwd):
+            transcript = ""
     if transcript:
         # ファイル名は端末生成のevent_idのみで構成する:
         # 外部入力(session_id)や同秒実行で宛先が衝突してatomic renameが上書きするのを防ぎ、
@@ -68,7 +83,7 @@ def main():
             "event_id": event_id,
             "session_id": session_id,
             "project_dir": cwd,
-            "git_remote_url": git_info(["remote", "get-url", "origin"], cwd),
+            "git_remote_url": remote,
             "git_branch": git_info(["rev-parse", "--abbrev-ref", "HEAD"], cwd),
             "transcript": transcript,
             "client_version": data.get("version"),
@@ -93,6 +108,9 @@ def main():
             try:
                 # project_keyはmungedディレクトリ名から(端末間で安定)
                 munged = md.relative_to(projects_root).parts[0]
+                # 収集除外(§8.3)。munged名しか無いためパスglobは '<base>/**' 形式のみ効く
+                if exclude.is_excluded(excludes, munged_dir=munged):
+                    continue
                 event_id = uuid.uuid4().hex
                 spool({
                     "device": device,

@@ -1,0 +1,13 @@
+# sync-exclude — 収集除外リスト(設計書§8.3)
+#
+# ここに書いたプロジェクトはセッション収集の対象外になる(1回の編集で全端末に反映):
+#   1) 端末側: hookがスプールに書かない(データが端末の外に出ない)
+#   2) NAS側 : ingest APIが受信しても保存せず捨てる(古い端末や設定ミスからの漏れ止め)
+#   3) 配布側: turnsが無いためindexも生成されない
+#
+# 形式(1行1エントリ):
+#   - '/' か '~' で始まる行: パスglob。'~/private/**' は ~/private 自身と配下すべて
+#   - それ以外: project_key 完全一致(例: github.com/user/repo、ディレクトリ名)
+#
+# すでに収集済みのデータを消すには NAS で: python3 /volume2/claude-system/batch/purge.py --project <key>
+# 一時的にセッション単位で止めるには: NAS_MEMORY_DISABLE=1 でclaude を起動

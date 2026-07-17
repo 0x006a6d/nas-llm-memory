@@ -22,8 +22,8 @@
 
 ## ディレクトリ
 
-- `terminal/` — 端末側。hooks (spool_write.py / sender.py / session_start.sh)、setup.sh、settings.json のテンプレート
-- `nas/` — NAS 側。ingest API (FastAPI + スキーマ SQL)、docker-compose、夜間バッチ、バックアップ、crontab
+- `terminal/` — 端末側。hooks (spool_write.py / sender.py / session_start.sh)、setup.sh、settings.json のテンプレート、sync-exclude.txt (収集除外リスト)
+- `nas/` — NAS 側。ingest API (FastAPI + スキーマ SQL)、docker-compose、夜間バッチ、バックアップ、purge、crontab
 
 ## データの流れ
 
@@ -54,7 +54,8 @@ NAS 側: `nas/` を配置し、`ingest/secrets/` に `api_token` と `db_passwor
 ```bash
 cd nas
 for f in ingest/schema/001_init.sql ingest/schema/003_p2.sql \
-         ingest/schema/004_event_id.sql ingest/schema/005_backfill.sql; do
+         ingest/schema/004_event_id.sql ingest/schema/005_backfill.sql \
+         ingest/schema/006_agent.sql; do
   docker compose exec -T db psql -U claude -d claude_memory -v ON_ERROR_STOP=1 -f - < "$f"
 done
 ```
@@ -69,6 +70,25 @@ NAS_IP=<NASのIP> ~/claude-config/setup/setup.sh
 ```
 
 setup.sh は冪等で、skills の symlink、settings.json への hooks マージ、スプール設定、sender の定期実行登録 (macOS は launchd、Linux は cron)、ユーザーレベル CLAUDE.md への index @import を行う。
+
+## 収集除外 (オプトアウト)
+
+同期・収集したくないプロジェクトは claude-config リポジトリ直下の `sync-exclude.txt` に書く (1 回の編集で全端末に配布される)。書式は project_key の完全一致か、`~/private/**` のようなパス glob。三重に効く:
+
+1. 端末側 — hook / sender (Codex rollout 走査含む) / backfill がスプールに書かない (データが端末の外に出ない)
+2. NAS 側 — ingest API も同リストを読み、該当 POST を保存せず捨てる (古い端末や設定ミスからの漏れ止め)。docker-compose が claude-config clone を読み取り専用マウントする (`nas/.env` の `CLAUDE_CONFIG_DIR`)
+3. 配布側 — turns が無いため index も生成されない
+
+一時的にセッション単位で止めるには `NAS_MEMORY_DISABLE=1` を立てて起動する。収集済みデータの事後除外は NAS 上で `python3 /volume2/claude-system/batch/purge.py --project <key>` (件数を表示して確認後、turns / raw_payloads / auto_memory_snapshots / facts / 配布済み index を削除し、purge.log に記録する)。
+
+## Codex CLI 対応
+
+OpenAI Codex CLI のセッションも同じ経路に載る (`docs` の追補設計):
+
+- 収集 — sender が `~/.codex/sessions/**/rollout-*.jsonl` を走査し、未送信/更新分をスプールに包んで送る (hook 不要。mtime 5 分未満の書きかけは次回に回す。送信済みは `~/.claude-spool/codex-sent.jsonl` で差分管理)
+- 蒸留 — ingest が rollout を `agent='codex'` の turns に正規化 (role は user/assistant/tool へ写像、reasoning は暗号化のため対象外、ID は行番号から決定的に生成 = 再送で重複しない)。夜間バッチはエージェントを問わず同じ facts 層に蒸留する
+- 配布 — sender が general index を `~/.codex/AGENTS.md` のマーカー区切り管理セクション (`nas-memory:begin/end`) に展開する。手書き本文には触れない
+- 制約 — プロジェクト単位の注入は未実装。codex 0.144.1 は `<project>/.codex/AGENTS.md` を読まず (実機検証)、commit 対象の AGENTS.md 本体へ index を展開すると記憶がリポジトリに漏れるため
 
 ## 初回データ移行 (バックフィル)
 

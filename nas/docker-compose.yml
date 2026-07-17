@@ -37,6 +37,11 @@ services:
       DB_USER: claude
       DB_PASSWORD_FILE: /run/secrets/db_password
       API_TOKEN_FILE: /run/secrets/api_token
+      SYNC_EXCLUDE_FILE: /claude-config/sync-exclude.txt
+    volumes:
+      # 収集除外リスト(§8.3 第二防衛線)。配布リポジトリのcloneを読み取り専用でマウントし、
+      # sync-exclude.txt の更新(git pull)が再起動なしで反映されるようにする
+      - "${CLAUDE_CONFIG_DIR:?nas/.env に CLAUDE_CONFIG_DIR=<claude-config cloneの絶対パス> を設定}:/claude-config:ro"
     ports:
       # LAN内の各端末からPOSTを受ける(HTTPS)。全インターフェース公開を避けるため
       # バインド先IPは必須: nas/.env に INGEST_BIND_IP=<NASのLAN IP> を書く

@@ -25,6 +25,7 @@ from pathlib import Path
 SYSTEM_DIR = Path("/volume2/claude-system")
 REPO_DIR = Path.home() / "claude-config"
 INDEX_MAX_LINES = 150          # 設計書§6.1-4(実測で調整)
+INDEX_MAX_BYTES = 30_000       # Codexのproject_doc_max_bytes既定(32KiB)より安全側(追補§3.3)
 TURN_SNIPPET_CHARS = 1500      # 1ターンあたりの最大文字数
 PROJECT_BUDGET_CHARS = 80_000  # verify 1回あたりのturnsプロンプト上限
 MEMORY_BUDGET_CHARS = 20_000   # verify 1回あたりのauto memoryプロンプト上限
@@ -364,6 +365,11 @@ def enrich(project_key: str) -> int:
     lines = md.splitlines()[:INDEX_MAX_LINES]  # 上限をコードでも強制
     header = "<!-- 夜間バッチ生成。手動編集しない。indexとauto memoryが食い違う場合はより新しい情報を優先 -->"
     body = "\n".join([lines[0] if lines else f"# {title}", header] + lines[1:]) + "\n"
+    # CodexはAGENTS.mdの読み込みバイト上限(project_doc_max_bytes、既定32KiB)がある(Codex追補§3.3)。
+    # 行数上限で通常は届かないが、超過に気づけるよう警告だけ出す
+    if len(body.encode("utf-8")) > INDEX_MAX_BYTES:
+        log(f"  WARN: index {project_key} が{INDEX_MAX_BYTES}バイトを超過"
+            f"({len(body.encode('utf-8'))}B)。Codex側で切り詰められる可能性")
 
     dir_name = "general" if project_key == "general" else project_dir_name(project_key)
     out_path = REPO_DIR / "memory" / dir_name / "index.md"
@@ -463,11 +469,18 @@ def main():
 
         turns_processed = int(psql(
             f"SELECT count(*) FROM turns WHERE id > {wm_turn} AND id <= {max_turn};"))
+        # agent別のturns内訳(Codex追補§4: どちらのエージェント由来の知識が多いかの計測)
+        agents = psql(
+            f"SELECT string_agg(agent || ':' || n, ' ') FROM "
+            f"(SELECT agent, count(*) AS n FROM turns "
+            f" WHERE id > {wm_turn} AND id <= {max_turn} GROUP BY agent ORDER BY agent) a;")
+        notes = (f"inserted={total_inserted} projects={len(projects)}"
+                 + (f" agents=({agents})" if agents else ""))
         psql(f"UPDATE batch_runs SET finished_at=now(), status='success', "
              f"turns_processed={turns_processed}, candidates_dropped={total_dropped}, "
              f"index_lines={index_lines}, watermark_turn_id={max_turn}, "
              f"watermark_snapshot_id={max_snap}, "
-             f"notes={q('inserted=' + str(total_inserted) + ' projects=' + str(len(projects)))} "
+             f"notes={q(notes)} "
              f"WHERE id={run_id};")
         log(f"run {run_id}: success (facts+{total_inserted}, dropped={total_dropped})")
     except Exception as exc:

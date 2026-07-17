@@ -8,17 +8,27 @@
 # - Claude Codeのローカル保持期間で古いセッションは消えるため、稼働開始の最初期に実行する
 set -euo pipefail
 
+BACKFILL_CONFIG_DIR="$(cd -- "$(dirname -- "$0")/.." && pwd)" || exit 1
+export BACKFILL_CONFIG_DIR
+
 exec python3 - <<'PYEOF'
 import hashlib
 import json
+import os
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.environ["BACKFILL_CONFIG_DIR"], "hooks"))
+import exclude
 
 SPOOL = Path.home() / ".claude-spool" / "pending"
 PROJECTS = Path.home() / ".claude" / "projects"
 DEVICE = socket.gethostname()
+EXCLUDES = exclude.load_entries(
+    Path(os.environ["BACKFILL_CONFIG_DIR"]) / "sync-exclude.txt")
 
 
 def iso(ts):
@@ -81,6 +91,15 @@ def main():
             if not cwd and not session_id:
                 n_skip += 1  # パース可能な行が無い
                 continue
+            remote = git_remote(cwd) if cwd and Path(cwd).is_dir() else None
+            # 収集除外(設計書§8.3)
+            if exclude.is_excluded(
+                    EXCLUDES,
+                    project_key=exclude.normalize_project_key(remote, cwd),
+                    project_dir=cwd,
+                    munged_dir=proj_dir.name):
+                n_skip += 1
+                continue
             eid = event_id("transcript", jl, mtime)
             spool({
                 "device": DEVICE,
@@ -89,7 +108,7 @@ def main():
                 "event_id": eid,
                 "session_id": session_id or jl.stem,
                 "project_dir": cwd,
-                "git_remote_url": git_remote(cwd) if cwd and Path(cwd).is_dir() else None,
+                "git_remote_url": remote,
                 "git_branch": None,
                 "transcript": text,
                 "client_version": None,
@@ -100,6 +119,10 @@ def main():
 
         # --- auto memory
         for md in proj_dir.glob("memory/**/*.md"):
+            # 収集除外(設計書§8.3)。munged名しか無いためパスglobは '<base>/**' 形式のみ効く
+            if exclude.is_excluded(EXCLUDES, munged_dir=proj_dir.name):
+                n_skip += 1
+                continue
             try:
                 mtime = md.stat().st_mtime
                 content = md.read_text(errors="replace")
