@@ -115,7 +115,12 @@ def _ensure_excluded(project_dir: Path) -> None:
 
 
 def _sync_project(config_dir, project_dir: str) -> bool:
-    """1プロジェクトの AGENTS.override.md を再生成する。書き換えたらTrue。"""
+    """1プロジェクトの AGENTS.override.md を再生成する。書き換えたらTrue。
+
+    indexが未生成でも手書きAGENTS.mdがあれば手書きのみで生成する:
+    CLAUDE.mdは `@AGENTS.override.md` だけを参照する構成(追補§3.2)のため、
+    登録済みプロジェクトでは生成物が常に存在しないと手書き指示ごと消える。
+    """
     d = Path(project_dir)
     if not d.is_dir():
         return False
@@ -125,18 +130,20 @@ def _sync_project(config_dir, project_dir: str) -> bool:
     hw_path = d / "AGENTS.md"
     handwritten = hw_path.read_text(encoding="utf-8") if hw_path.exists() else ""
 
-    if not index.exists():
-        # indexが(まだ/もう)無い: 生成物を残すと手書きAGENTS.mdを隠すだけなので撤去する。
-        # 自分の生成物(マーカーあり)以外は絶対に消さない
-        if target.exists() and BEGIN in target.read_text(encoding="utf-8"):
-            target.unlink()
-            return True
+    if not handwritten.strip() and not index.exists():
+        # 中身になるものが何も無い: 自分の生成物(署名あり)だけ撤去する
+        if target.exists():
+            cur = target.read_text(encoding="utf-8")
+            if cur.startswith(GEN_NOTE) or BEGIN in cur:
+                target.unlink()
+                return True
         return False
 
-    section = f"{BEGIN}\n{index.read_text(encoding='utf-8').strip()}\n{END}"
+    section = (f"{BEGIN}\n{index.read_text(encoding='utf-8').strip()}\n{END}"
+               if index.exists() else "")
     new = GEN_NOTE + "\n\n" \
-        + (handwritten.rstrip() + "\n\n" if handwritten.strip() else "") \
-        + section + "\n"
+        + (handwritten.rstrip() + ("\n\n" if section else "\n") if handwritten.strip() else "") \
+        + (section + "\n" if section else "")
     # 連結漏れ検出(追補§6): overrideは手書きAGENTS.mdを完全に隠すため、
     # 手書き本文が結果に含まれないなら書き込まない(=手書き指示の消失を防ぐ)
     if handwritten.strip() and handwritten.rstrip() not in new:
@@ -187,13 +194,15 @@ def register(config_dir, project_dir: str) -> None:
     else:
         print(f"登録済み: {d}")
     _ensure_excluded(d)  # 生成前でも先回りで追跡除外しておく
-    if _sync_project(config_dir, str(d)):
-        print("AGENTS.override.md を生成しました")
-    elif (d / "AGENTS.override.md").exists():
-        print("AGENTS.override.md は最新です")
+    changed = _sync_project(config_dir, str(d))
+    target = d / "AGENTS.override.md"
+    if target.exists():
+        state = "生成しました" if changed else "最新です"
+        note = "" if BEGIN in target.read_text(encoding="utf-8") else \
+            "(memory index未生成: 夜間バッチが生成した後の同期で自動追記)"
+        print(f"AGENTS.override.md を{state}{note}")
     else:
-        key = exclude.normalize_project_key(_git_remote(d), str(d))
-        print(f"memory index 未生成(key={key})。夜間バッチが生成した後の同期で自動作成されます")
+        print("手書きAGENTS.mdもmemory indexも無いため未生成(どちらかができた後の同期で自動作成)")
     print("Claude Code側: プロジェクトのCLAUDE.mdに `@AGENTS.override.md` を追記し、"
           "手書き指示はAGENTS.mdへ一本化してください(追補§3.2)")
 
