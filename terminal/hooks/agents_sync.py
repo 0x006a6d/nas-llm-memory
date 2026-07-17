@@ -89,11 +89,24 @@ def _project_dir_name(project_key: str) -> str:
     return f"{safe}-{hashlib.sha1(project_key.encode()).hexdigest()[:8]}"
 
 
-def _load_registry() -> list:
+def _load_registry(strict: bool = False) -> list:
+    """登録済みプロジェクト一覧。ファイルが無ければ空。
+
+    読めない/形式不正の場合、strict=True(register経路)は例外にする:
+    黙って空扱いにすると、直後の保存で既存の登録が空で上書きされるため。
+    strict=False(同期経路)は警告して空を返す(同期は読み取りのみで安全)。
+    """
+    if not REGISTRY.exists():
+        return []
     try:
         reg = json.loads(REGISTRY.read_text(encoding="utf-8"))
-        return [p for p in reg if isinstance(p, str)] if isinstance(reg, list) else []
-    except Exception:
+        if not isinstance(reg, list):
+            raise ValueError(f"list以外の形式: {type(reg).__name__}")
+        return [p for p in reg if isinstance(p, str)]
+    except Exception as e:
+        if strict:
+            raise RuntimeError(f"レジストリ({REGISTRY})を読めません: {e}") from e
+        print(f"agents_sync: WARN レジストリ({REGISTRY})を読めません: {e}", file=sys.stderr)
         return []
 
 
@@ -106,11 +119,15 @@ def _ensure_excluded(project_dir: Path) -> None:
     p = Path(r.stdout.strip())
     if not p.is_absolute():
         p = project_dir / p
-    lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
-    if any(ln.strip() in ("/AGENTS.override.md", "AGENTS.override.md") for ln in lines):
+    current = p.read_text(encoding="utf-8") if p.exists() else ""
+    if any(ln.strip() in ("/AGENTS.override.md", "AGENTS.override.md")
+           for ln in current.splitlines()):
         return
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:
+        # 既存最終行に改行が無い場合に行が融合しないよう補完する
+        if current and not current.endswith("\n"):
+            f.write("\n")
         f.write("/AGENTS.override.md\n")
 
 
@@ -182,7 +199,10 @@ def register(config_dir, project_dir: str) -> None:
     d = Path(project_dir).expanduser().resolve()
     if not d.is_dir():
         sys.exit(f"agents_sync: {d} はディレクトリではありません")
-    reg = _load_registry()
+    try:
+        reg = _load_registry(strict=True)
+    except RuntimeError as e:
+        sys.exit(f"agents_sync: {e}(修復するまでregisterを中止します)")
     if str(d) not in reg:
         reg.append(str(d))
         REGISTRY.parent.mkdir(parents=True, exist_ok=True)
