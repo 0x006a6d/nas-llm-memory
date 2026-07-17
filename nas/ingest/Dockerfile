@@ -4,7 +4,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py redact_patterns.json ./
+COPY app.py parsers.py exclude.py redact_patterns.json ./
 
 # 公開APIをrootで動かさない(アプリはファイル書き込み不要なのでchownも不要)。
 # compose 側は user: ${INGEST_UID} でさらに上書きする(file secretsが

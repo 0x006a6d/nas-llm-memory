@@ -19,6 +19,10 @@ jobs:
       - name: Python 構文チェック
         run: python3 -m compileall -q terminal nas
 
+      - name: exclude.py の2コピーが同一か
+        # 端末側(第一防衛線)とingest側(第二防衛線)は同じ判定ロジックであることが前提
+        run: cmp terminal/hooks/exclude.py nas/ingest/exclude.py
+
       - name: shellcheck
         run: shellcheck -S warning terminal/hooks/*.sh terminal/setup/*.sh nas/batch/*.sh nas/ingest/*.sh
 
@@ -43,4 +47,5 @@ jobs:
           printf dummy > nas/ingest/secrets/db_password
           printf dummy > nas/ingest/secrets/tls_cert.pem
           printf dummy > nas/ingest/secrets/tls_key.pem
-          INGEST_BIND_IP=127.0.0.1 INGEST_UID=1000 docker compose -f nas/docker-compose.yml config -q
+          INGEST_BIND_IP=127.0.0.1 INGEST_UID=1000 CLAUDE_CONFIG_DIR=/tmp \
+            docker compose -f nas/docker-compose.yml config -q

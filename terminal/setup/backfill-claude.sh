@@ -8,17 +8,27 @@
 # - Claude Codeのローカル保持期間で古いセッションは消えるため、稼働開始の最初期に実行する
 set -euo pipefail
 
+BACKFILL_CONFIG_DIR="$(cd -- "$(dirname -- "$0")/.." && pwd)" || exit 1
+export BACKFILL_CONFIG_DIR
+
 exec python3 - <<'PYEOF'
 import hashlib
 import json
+import os
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.environ["BACKFILL_CONFIG_DIR"], "hooks"))
+import exclude
 
 SPOOL = Path.home() / ".claude-spool" / "pending"
 PROJECTS = Path.home() / ".claude" / "projects"
 DEVICE = socket.gethostname()
+EXCLUDES = exclude.load_entries(
+    Path(os.environ["BACKFILL_CONFIG_DIR"]) / "sync-exclude.txt")
 
 
 def iso(ts):
@@ -58,6 +68,7 @@ def main():
     for proj_dir in sorted(PROJECTS.iterdir()):
         if not proj_dir.is_dir():
             continue
+        proj_cwd = proj_remote = None  # このプロジェクトの実cwd(auto memoryで使う)
 
         # --- 過去トランスクリプト
         for jl in sorted(proj_dir.glob("*.jsonl")):
@@ -81,6 +92,17 @@ def main():
             if not cwd and not session_id:
                 n_skip += 1  # パース可能な行が無い
                 continue
+            remote = git_remote(cwd) if cwd and Path(cwd).is_dir() else None
+            if cwd and not proj_cwd:
+                proj_cwd, proj_remote = cwd, remote
+            # 収集除外(設計書§8.3)
+            if exclude.is_excluded(
+                    EXCLUDES,
+                    project_key=exclude.normalize_project_key(remote, cwd),
+                    project_dir=cwd,
+                    munged_dir=proj_dir.name if not cwd else None):
+                n_skip += 1
+                continue
             eid = event_id("transcript", jl, mtime)
             spool({
                 "device": DEVICE,
@@ -89,7 +111,7 @@ def main():
                 "event_id": eid,
                 "session_id": session_id or jl.stem,
                 "project_dir": cwd,
-                "git_remote_url": git_remote(cwd) if cwd and Path(cwd).is_dir() else None,
+                "git_remote_url": remote,
                 "git_branch": None,
                 "transcript": text,
                 "client_version": None,
@@ -99,7 +121,19 @@ def main():
             n_t += 1
 
         # --- auto memory
+        # 収集除外(設計書§8.3): transcriptから解決した実cwdで正確に判定し、
+        # 解決できないプロジェクトのみmunged名のフォールバック判定
+        if proj_cwd:
+            mem_excluded = exclude.is_excluded(
+                EXCLUDES,
+                project_key=exclude.normalize_project_key(proj_remote, proj_cwd),
+                project_dir=proj_cwd)
+        else:
+            mem_excluded = exclude.is_excluded(EXCLUDES, munged_dir=proj_dir.name)
         for md in proj_dir.glob("memory/**/*.md"):
+            if mem_excluded:
+                n_skip += 1
+                continue
             try:
                 mtime = md.stat().st_mtime
                 content = md.read_text(errors="replace")
@@ -112,8 +146,9 @@ def main():
                 "kind": "auto_memory",
                 "agent": "claude-code",
                 "event_id": eid,
-                "project_dir": proj_dir.name,
-                "git_remote_url": None,
+                # 実cwdが解決できればtranscriptと同じproject_keyに正規化される
+                "project_dir": proj_cwd or proj_dir.name,
+                "git_remote_url": proj_remote,
                 "file_path": str(md),
                 "content": content,
                 "file_mtime": iso(mtime),
