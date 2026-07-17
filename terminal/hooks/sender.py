@@ -162,12 +162,39 @@ def spool_codex():
                 excludes,
                 project_key=exclude.normalize_project_key(remote, cwd),
                 project_dir=cwd):
+            # チャンクはturn_context/session_meta行を含まないことがあるため、
+            # 「チャンク開始時点の最新model/cwd」を同梱してparserに引き継ぐ。
+            # json.loadsは該当typeの行だけに限定する(巨大ファイルの全行parse回避)
+            ctx_model = None
+            ctx_cwd = cwd
+
+            def _track_context(lines_range):
+                nonlocal ctx_model, ctx_cwd
+                for ln in lines_range:
+                    if '"turn_context"' not in ln and '"session_meta"' not in ln:
+                        continue
+                    try:
+                        o = json.loads(ln)
+                    except Exception:
+                        continue
+                    p = o.get("payload") or {}
+                    if o.get("type") == "turn_context":
+                        ctx_model = p.get("model") or ctx_model
+                        ctx_cwd = p.get("cwd") or ctx_cwd
+                    elif o.get("type") == "session_meta":
+                        ctx_cwd = p.get("cwd") or ctx_cwd
+
+            _track_context(full_lines[:sent_lines])  # 送信済み範囲の文脈を復元
             start = sent_lines
             while start < len(full_lines):
                 i = start
                 acc = 0
-                while i < len(full_lines) and (acc < CODEX_CHUNK_BYTES or i == start):
-                    acc += len(full_lines[i]) + 1
+                while i < len(full_lines):
+                    # UTF-8バイト数で追加前に判定(超過は1行単独送信の場合のみ)
+                    b = len(full_lines[i].encode("utf-8")) + 1
+                    if i > start and acc + b > CODEX_CHUNK_BYTES:
+                        break
+                    acc += b
                     i += 1
                 # 決定的event_id: 同じ(ファイル, 開始行, サイズ, mtime)は
                 # 再実行しても二重投入されない
@@ -181,6 +208,8 @@ def spool_codex():
                     "session_id": f.stem,   # ingest側パーサがsession_metaのidを優先する
                     "codex_session_id": meta_id,  # チャンクにmeta行が無いときの帰属先
                     "line_offset": start,   # このチャンクの先頭行番号(0始まり)
+                    "context_model": ctx_model,  # チャンク開始時点の最新turn_context
+                    "context_cwd": ctx_cwd,
                     "project_dir": cwd,
                     "git_remote_url": remote,
                     "git_branch": None,
@@ -191,6 +220,7 @@ def spool_codex():
                 tmp = pending / (event_id + ".json.tmp")
                 tmp.write_text(payload, encoding="utf-8")
                 tmp.rename(pending / (event_id + ".json"))
+                _track_context(full_lines[start:i])  # 次チャンク用に文脈を進める
                 start = i
         # 除外分も走査済みとして記録(毎回読み直さない)
         state[str(f)] = (sig[0], sig[1], len(full_lines))

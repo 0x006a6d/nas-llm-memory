@@ -122,7 +122,9 @@ def parse_codex_rollout(payload: dict, payload_id: int) -> list[dict]:
     - session_id: 'codex:' プレフィックス + session_metaのid(無ければファイル名)
     - 増分チャンク対応: senderは新しい行だけを line_offset(0始まりの先頭行番号)付きで
       送ってくる。行番号は常にファイル絶対番号にしてID規約を維持する。
-      チャンクにsession_meta行が含まれない場合は payload の codex_session_id で帰属する
+      チャンクにsession_meta/turn_context行が含まれない場合に備え、
+      senderが同梱する codex_session_id / context_model / context_cwd
+      (チャンク開始時点の最新値)を初期状態として使う
     """
     device = payload.get("device", "unknown")
     file_stem = payload.get("session_id") or "unknown"  # senderはrolloutファイル名(拡張子なし)を入れる
@@ -130,8 +132,8 @@ def parse_codex_rollout(payload: dict, payload_id: int) -> list[dict]:
         payload.get("git_remote_url"), payload.get("project_dir")
     )
     session_id = payload.get("codex_session_id")
-    cwd = payload.get("project_dir")
-    model = None
+    cwd = payload.get("context_cwd") or payload.get("project_dir")
+    model = payload.get("context_model")
     try:
         line_offset = int(payload.get("line_offset") or 0)
     except (TypeError, ValueError):
