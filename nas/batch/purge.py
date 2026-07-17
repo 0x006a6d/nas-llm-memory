@@ -29,10 +29,9 @@ from nightly import (GIT_ENV, REPO_DIR, SYSTEM_DIR, acquire_lock,
                      project_dir_name, psql, psql_json, pull_repo, q)
 
 sys.path.insert(0, str(SYSTEM_DIR / "ingest"))
-try:
-    from exclude import normalize_project_key
-except ImportError:  # ingest未配置でも動く(raw_payloadsの突き合わせだけ精度が落ちる)
-    normalize_project_key = None
+# 事後除外は「消したつもりで残る」が最悪の失敗。正規化ロジックが読めないなら
+# 不完全な削除を実行せず安全側に停止する
+from exclude import normalize_project_key
 
 
 def collect_raw_ids(key: str) -> list:
@@ -45,13 +44,12 @@ def collect_raw_ids(key: str) -> list:
         f"SELECT json_agg(json_build_object('id', payload_id)) FROM "
         f"(SELECT DISTINCT payload_id FROM turns "
         f" WHERE project_key={q(key)} AND payload_id IS NOT NULL) t;")}
-    if normalize_project_key is not None:
-        rows = psql_json(
-            "SELECT json_agg(json_build_object('id', id, 'u', payload->>'git_remote_url', "
-            "'d', payload->>'project_dir')) FROM raw_payloads;")
-        for r in rows:
-            if normalize_project_key(r.get("u"), r.get("d")) == key:
-                ids.add(int(r["id"]))
+    rows = psql_json(
+        "SELECT json_agg(json_build_object('id', id, 'u', payload->>'git_remote_url', "
+        "'d', payload->>'project_dir')) FROM raw_payloads;")
+    for r in rows:
+        if normalize_project_key(r.get("u"), r.get("d")) == key:
+            ids.add(int(r["id"]))
     return sorted(ids)
 
 

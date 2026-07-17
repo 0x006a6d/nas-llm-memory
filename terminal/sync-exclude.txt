@@ -17,3 +17,5 @@
 #
 # すでに収集済みのデータを消すには NAS で: python3 /volume2/claude-system/batch/purge.py --project <key>
 # 一時的にセッション単位で止めるには: NAS_MEMORY_DISABLE=1 でclaude を起動
+#   (Claude Codeのhook経路のみ。Codexはhookが無くsenderの走査で収集されるため、
+#    NAS_MEMORY_DISABLEは効かない。Codexを除外するにはこのファイルにパス/キーを書く)
