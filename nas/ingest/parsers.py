@@ -120,17 +120,27 @@ def parse_codex_rollout(payload: dict, payload_id: int) -> list[dict]:
       同一セッションの複数rolloutファイル(resume)でも衝突しないよう
       ファイル名(session_idではなく)を含める
     - session_id: 'codex:' プレフィックス + session_metaのid(無ければファイル名)
+    - 増分チャンク対応: senderは新しい行だけを line_offset(0始まりの先頭行番号)付きで
+      送ってくる。行番号は常にファイル絶対番号にしてID規約を維持する。
+      チャンクにsession_meta/turn_context行が含まれない場合に備え、
+      senderが同梱する codex_session_id / context_model / context_cwd
+      (チャンク開始時点の最新値)を初期状態として使う
     """
     device = payload.get("device", "unknown")
     file_stem = payload.get("session_id") or "unknown"  # senderはrolloutファイル名(拡張子なし)を入れる
     project_key = normalize_project_key(
         payload.get("git_remote_url"), payload.get("project_dir")
     )
-    session_id = None
-    cwd = payload.get("project_dir")
-    model = None
+    session_id = payload.get("codex_session_id")
+    cwd = payload.get("context_cwd") or payload.get("project_dir")
+    model = payload.get("context_model")
+    try:
+        line_offset = int(payload.get("line_offset") or 0)
+    except (TypeError, ValueError):
+        line_offset = 0
     rows: list[dict] = []
-    for lineno, line in enumerate((payload.get("transcript") or "").splitlines(), 1):
+    for lineno, line in enumerate((payload.get("transcript") or "").splitlines(),
+                                  1 + line_offset):
         line = line.strip()
         if not line:
             continue
