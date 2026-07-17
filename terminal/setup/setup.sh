@@ -144,7 +144,9 @@ esac
 # 6. ユーザーレベルCLAUDE.mdへの@import(設計書§7)
 USER_MD="$CLAUDE_DIR/CLAUDE.md"
 IMPORT_LINE="@$CONFIG_DIR/memory/general/index.md"
-if ! grep -qF "$IMPORT_LINE" "$USER_MD" 2>/dev/null; then
+# 判定はパス表記に依存させない: 旧セットアップは `@~/claude-config/...` 形式で
+# 書いており、絶対パスの完全一致だと二重追記になる
+if ! grep -q "memory/general/index.md" "$USER_MD" 2>/dev/null; then
     printf "\n%s\n" "$IMPORT_LINE" >> "$USER_MD"
     echo "  CLAUDE.md: general index を@import"
 fi
