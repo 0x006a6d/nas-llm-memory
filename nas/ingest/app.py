@@ -208,10 +208,11 @@ def _parse_and_insert(conn, kind: str, payload: dict, payload_id: int) -> dict:
             cur = conn.execute(
                 """
                 INSERT INTO turns (device, project_key, session_id, message_uuid,
-                                   role, content, ts, cwd, git_branch, model, payload_id, agent)
+                                   role, content, ts, cwd, git_branch, model, payload_id,
+                                   agent, originator)
                 VALUES (%(device)s, %(project_key)s, %(session_id)s, %(message_uuid)s,
                         %(role)s, %(content)s, %(ts)s, %(cwd)s, %(git_branch)s,
-                        %(model)s, %(payload_id)s, %(agent)s)
+                        %(model)s, %(payload_id)s, %(agent)s, %(originator)s)
                 ON CONFLICT (session_id, message_uuid) DO NOTHING
                 """,
                 r,
