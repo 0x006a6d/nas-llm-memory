@@ -68,6 +68,7 @@ def main():
     for proj_dir in sorted(PROJECTS.iterdir()):
         if not proj_dir.is_dir():
             continue
+        proj_cwd = proj_remote = None  # このプロジェクトの実cwd(auto memoryで使う)
 
         # --- 過去トランスクリプト
         for jl in sorted(proj_dir.glob("*.jsonl")):
@@ -92,12 +93,14 @@ def main():
                 n_skip += 1  # パース可能な行が無い
                 continue
             remote = git_remote(cwd) if cwd and Path(cwd).is_dir() else None
+            if cwd and not proj_cwd:
+                proj_cwd, proj_remote = cwd, remote
             # 収集除外(設計書§8.3)
             if exclude.is_excluded(
                     EXCLUDES,
                     project_key=exclude.normalize_project_key(remote, cwd),
                     project_dir=cwd,
-                    munged_dir=proj_dir.name):
+                    munged_dir=proj_dir.name if not cwd else None):
                 n_skip += 1
                 continue
             eid = event_id("transcript", jl, mtime)
@@ -118,9 +121,17 @@ def main():
             n_t += 1
 
         # --- auto memory
+        # 収集除外(設計書§8.3): transcriptから解決した実cwdで正確に判定し、
+        # 解決できないプロジェクトのみmunged名のフォールバック判定
+        if proj_cwd:
+            mem_excluded = exclude.is_excluded(
+                EXCLUDES,
+                project_key=exclude.normalize_project_key(proj_remote, proj_cwd),
+                project_dir=proj_cwd)
+        else:
+            mem_excluded = exclude.is_excluded(EXCLUDES, munged_dir=proj_dir.name)
         for md in proj_dir.glob("memory/**/*.md"):
-            # 収集除外(設計書§8.3)。munged名しか無いためパスglobは '<base>/**' 形式のみ効く
-            if exclude.is_excluded(EXCLUDES, munged_dir=proj_dir.name):
+            if mem_excluded:
                 n_skip += 1
                 continue
             try:
@@ -135,8 +146,9 @@ def main():
                 "kind": "auto_memory",
                 "agent": "claude-code",
                 "event_id": eid,
-                "project_dir": proj_dir.name,
-                "git_remote_url": None,
+                # 実cwdが解決できればtranscriptと同じproject_keyに正規化される
+                "project_dir": proj_cwd or proj_dir.name,
+                "git_remote_url": proj_remote,
                 "file_path": str(md),
                 "content": content,
                 "file_mtime": iso(mtime),

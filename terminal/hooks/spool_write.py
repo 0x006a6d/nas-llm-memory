@@ -13,7 +13,12 @@ import time
 import uuid
 from pathlib import Path
 
-import exclude
+# hookは絶対に失敗させない契約: import失敗(部分配布・古いcheckout等)でも
+# クラッシュせず、除外なしで収集を続ける(失敗はhook_errors.logへ)
+try:
+    import exclude
+except Exception:
+    exclude = None
 
 SPOOL = Path.home() / ".claude-spool"
 PENDING = SPOOL / "pending"
@@ -57,16 +62,22 @@ def main():
     session_id = data.get("session_id") or "unknown"
     device = socket.gethostname()
     captured_at = iso()
-    excludes = exclude.load_entries(CONFIG_DIR / "sync-exclude.txt")
+    if exclude is None:
+        excludes = []
+        with open(SPOOL / "hook_errors.log", "a") as f:
+            f.write(f"{time.strftime('%F %T')} spool_write: "
+                    f"excludeモジュール読込失敗(除外無効で収集を続行)\n")
+    else:
+        excludes = exclude.load_entries(CONFIG_DIR / "sync-exclude.txt")
 
     # --- transcript本体
     transcript = ""
     tp = data.get("transcript_path")
     if tp and Path(tp).exists():
         transcript = Path(tp).read_text(errors="replace")
-    if transcript:
+    remote = git_info(["remote", "get-url", "origin"], cwd) if transcript else None
+    if transcript and excludes:
         # 収集除外(§8.3 第一防衛線): スプールにも書かない=データを端末の外に出さない
-        remote = git_info(["remote", "get-url", "origin"], cwd)
         if exclude.is_excluded(
                 excludes,
                 project_key=exclude.normalize_project_key(remote, cwd),
@@ -96,6 +107,35 @@ def main():
     scan_start = time.time()  # スキャン中に更新されたファイルを次回対象に残す基準
     failed_mtimes = []
     projects_root = Path.home() / ".claude" / "projects"
+    proj_cache = {}
+
+    def proj_info(munged_name):
+        """mungedディレクトリ名から実cwdとgitリモートを解決する(できる範囲で)。
+
+        munged名は記号が'-'に潰れて復元が曖昧なため、同プロジェクトの
+        トランスクリプトJSONLに記録されたcwdを読む。これにより
+        project_key が transcript 側と揃い、除外判定(§8.3)も正確に効く。
+        """
+        if munged_name not in proj_cache:
+            found = None
+            for jl in sorted(projects_root.glob(munged_name + "/*.jsonl"), reverse=True):
+                try:
+                    for line in jl.read_text(errors="replace").splitlines()[:50]:
+                        try:
+                            c = json.loads(line).get("cwd")
+                        except Exception:
+                            continue
+                        if c:
+                            found = c
+                            break
+                except Exception:
+                    pass
+                if found:
+                    break
+            proj_cache[munged_name] = (
+                found, git_info(["remote", "get-url", "origin"], found) if found else None)
+        return proj_cache[munged_name]
+
     if projects_root.exists():
         for md in projects_root.glob("*/memory/**/*.md"):
             try:
@@ -106,18 +146,28 @@ def main():
             if mtime <= last:
                 continue
             try:
-                # project_keyはmungedディレクトリ名から(端末間で安定)
                 munged = md.relative_to(projects_root).parts[0]
-                # 収集除外(§8.3)。munged名しか無いためパスglobは '<base>/**' 形式のみ効く
-                if exclude.is_excluded(excludes, munged_dir=munged):
-                    continue
+                mem_cwd, mem_remote = proj_info(munged)
+                # 収集除外(§8.3)。実cwdが解決できたら正確に判定し、
+                # できない場合のみmunged名のフォールバック判定を使う
+                if excludes:
+                    if mem_cwd:
+                        if exclude.is_excluded(
+                                excludes,
+                                project_key=exclude.normalize_project_key(mem_remote, mem_cwd),
+                                project_dir=mem_cwd):
+                            continue
+                    elif exclude.is_excluded(excludes, munged_dir=munged):
+                        continue
                 event_id = uuid.uuid4().hex
                 spool({
                     "device": device,
                     "kind": "auto_memory",
                     "event_id": event_id,
-                    "project_dir": munged,
-                    "git_remote_url": None,
+                    # 実cwdが解決できればtranscriptと同じproject_keyに正規化される。
+                    # 解決できない場合は従来どおりmunged名
+                    "project_dir": mem_cwd or munged,
+                    "git_remote_url": mem_remote,
                     "file_path": str(md),
                     "content": md.read_text(errors="replace"),
                     "file_mtime": iso(mtime),

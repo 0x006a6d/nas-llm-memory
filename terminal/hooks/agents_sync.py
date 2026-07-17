@@ -31,10 +31,12 @@ def update_global_agents(config_dir) -> bool:
 
     target = codex_dir / "AGENTS.md"
     current = target.read_text(encoding="utf-8") if target.exists() else ""
-    if BEGIN in current and END in current.split(BEGIN, 1)[1]:
-        pre, rest = current.split(BEGIN, 1)
-        post = rest.split(END, 1)[1]
-        new = pre + section + post
+    # 最後のBEGINと対応するENDのペアだけを置き換える:
+    # 手書き本文に孤立したBEGINが紛れていても、その後方の本文を巻き込まない
+    b = current.rfind(BEGIN)
+    e = current.find(END, b) if b != -1 else -1
+    if b != -1 and e != -1:
+        new = current[:b] + section + current[e + len(END):]
     else:
         # 管理セクションが無ければ手書き本文の末尾に追加(本文は保持)
         new = (current.rstrip() + "\n\n" if current.strip() else "") + section + "\n"

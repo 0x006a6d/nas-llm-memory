@@ -12,6 +12,10 @@ append-only原則の例外その2(redactと並ぶ)として、操作ログを pu
   provenanceが該当プロジェクトのturnsを指すgeneral事実は件数と共に警告表示するので、
   必要なら手動で整理する
 - 実行前に sync-exclude.txt へ該当キーを追加しておくこと(再収集の防止)
+- 旧仕様のauto memoryはmungedディレクトリ名(例 '-Users-jm-secret')がproject_keyに
+  なっている。transcriptキーのpurgeでは消えないため、
+  `SELECT DISTINCT project_key FROM auto_memory_snapshots;` で確認し、
+  該当munged名でもう一度purgeすること
 """
 import argparse
 import shutil
@@ -21,8 +25,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nightly import (GIT_ENV, REPO_DIR, SYSTEM_DIR, project_dir_name, psql,
-                     psql_json, pull_repo, q)
+from nightly import (GIT_ENV, REPO_DIR, SYSTEM_DIR, acquire_lock,
+                     project_dir_name, psql, psql_json, pull_repo, q)
 
 sys.path.insert(0, str(SYSTEM_DIR / "ingest"))
 try:
@@ -58,6 +62,14 @@ def main():
     args = ap.parse_args()
     key = args.project
 
+    # nightly/backfill-distillと同じlockを共有: 並行runの失敗補償(facts削除・repo reset)と
+    # purgeのDB削除・index撤去が互いの結果を壊さないようにする
+    lock = acquire_lock()
+    if lock is None:
+        print("FAILED: nightly/backfillが実行中です。終了後に再実行してください",
+              file=sys.stderr)
+        sys.exit(1)
+
     n_turns = int(psql(f"SELECT count(*) FROM turns WHERE project_key={q(key)};"))
     n_mem = int(psql(f"SELECT count(*) FROM auto_memory_snapshots WHERE project_key={q(key)};"))
     n_facts = int(psql(f"SELECT count(*) FROM facts WHERE project_key={q(key)};"))
@@ -66,10 +78,18 @@ def main():
         f"SELECT count(*) FROM facts WHERE project_key='general' AND provenance && "
         f"(SELECT coalesce(array_agg(id), ARRAY[]::bigint[]) FROM turns WHERE project_key={q(key)});"))
 
+    # 配布済みindexディレクトリ(パストラバーサル防止: memory/ 直下であることを強制)
+    memory_root = (REPO_DIR / "memory").resolve()
+    index_dir = (memory_root / project_dir_name(key)).resolve()
+    if index_dir.parent != memory_root or index_dir == memory_root:
+        print(f"FAILED: 不正なindexパス: {index_dir}", file=sys.stderr)
+        sys.exit(1)
+
     print(f"purge対象 project_key={key}")
     print(f"  turns={n_turns} raw_payloads={len(raw_ids)} "
-          f"auto_memory={n_mem} facts={n_facts}")
-    if n_turns + n_mem + n_facts + len(raw_ids) == 0:
+          f"auto_memory={n_mem} facts={n_facts} "
+          f"index_dir={'あり' if index_dir.is_dir() else 'なし'}")
+    if n_turns + n_mem + n_facts + len(raw_ids) == 0 and not index_dir.is_dir():
         print("対象がありません")
         return
     if n_general:
@@ -81,10 +101,11 @@ def main():
             print("中止しました")
             return
 
-    raw_list = ",".join(map(str, raw_ids)) or "0"
-    # 1トランザクションで削除。他プロジェクトの事実が該当factsをreplacesで
-    # 参照している場合はFK違反にならないよう系譜を切ってから消す
-    psql(f"""
+    if n_turns + n_mem + n_facts + len(raw_ids) > 0:
+        raw_list = ",".join(map(str, raw_ids)) or "0"
+        # 1トランザクションで削除。他プロジェクトの事実が該当factsをreplacesで
+        # 参照している場合はFK違反にならないよう系譜を切ってから消す
+        psql(f"""
 BEGIN;
 UPDATE facts SET replaces = NULL
  WHERE replaces IN (SELECT id FROM facts WHERE project_key={q(key)})
@@ -97,9 +118,9 @@ DELETE FROM backfill_progress WHERE project_key={q(key)};
 COMMIT;
 """)
 
-    # 配布済みindexの撤去
+    # 配布済みindexの撤去(DB削除がcommit済みでgit操作だけ失敗した場合も、
+    # 再実行すればここに到達して撤去をやり直せる)
     pull_repo()
-    index_dir = REPO_DIR / "memory" / project_dir_name(key)
     removed = index_dir.is_dir()
     if removed:
         shutil.rmtree(index_dir)

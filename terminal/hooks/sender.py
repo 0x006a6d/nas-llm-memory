@@ -16,8 +16,17 @@ import time
 import urllib.request
 from pathlib import Path
 
-import agents_sync
-import exclude
+# import失敗(部分配布・古いcheckout等)でも本来の送信は止めない。
+# 除外判定が使えない間はCodex走査を行わない(fail-closed: 新しい収集経路は
+# 除外リストを適用できることが前提)
+try:
+    import agents_sync
+except Exception:
+    agents_sync = None
+try:
+    import exclude
+except Exception:
+    exclude = None
 
 SPOOL = Path.home() / ".claude-spool"
 CONFIG = SPOOL / "config.json"
@@ -82,6 +91,8 @@ def spool_codex():
     送信済みは (パス, サイズ, mtime) を codex-sent.jsonl に記録して差分だけ包む。
     resume等でファイルが伸びたら全体を再送し、重複はDB側UNIQUEが吸収する。
     """
+    if exclude is None:
+        return  # 除外判定なしで新規収集経路を動かさない(fail-closed)
     codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     sessions = codex_home / "sessions"
     if not sessions.is_dir():
@@ -116,16 +127,18 @@ def spool_codex():
             text = f.read_text(errors="replace")
         except Exception:
             continue
-        # rollout冒頭のsession_metaからcwdを読み、除外判定する(§8.3)
+        # rollout冒頭のsession_meta(通常1行目)からcwdを読み、除外判定する(§8.3)。
+        # 見つからない場合に備えturn_contextのcwdも受ける
         cwd = None
-        for line in text.splitlines()[:20]:
+        for line in text.splitlines()[:200]:
             try:
                 obj = json.loads(line)
             except Exception:
                 continue
-            if obj.get("type") == "session_meta":
+            if obj.get("type") in ("session_meta", "turn_context"):
                 cwd = (obj.get("payload") or {}).get("cwd")
-                break
+                if cwd:
+                    break
         remote = _git_remote(cwd) if cwd and Path(cwd).is_dir() else None
         if not exclude.is_excluded(
                 excludes,
@@ -201,7 +214,8 @@ def main():
         pass
     # general indexを ~/.codex/AGENTS.md の管理セクションへ配布(Codex追補§3.1)
     try:
-        agents_sync.update_global_agents(CONFIG_DIR)
+        if agents_sync is not None:
+            agents_sync.update_global_agents(CONFIG_DIR)
     except Exception:
         pass
 

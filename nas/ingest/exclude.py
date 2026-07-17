@@ -45,13 +45,32 @@ def _munge(path):
     return re.sub(r"[^A-Za-z0-9-]", "-", path)
 
 
+def _pattern_variants(pattern):
+    """'~'始まりのパターンは2通りに展開する。
+
+    1) このプロセスのHOMEで展開(端末側で正確に効く)
+    2) '~'→'*' 置換(ingestコンテナのようにHOMEが端末と異なる環境向け。
+       任意のホームディレクトリ配下に一致する。第二防衛線なので
+       過剰側(余計に除外する側)に倒すのが安全)
+    """
+    if pattern.startswith("~"):
+        return [os.path.expanduser(pattern), "*" + pattern[1:]]
+    return [pattern]
+
+
 def _path_matches(path, pattern):
-    pattern = os.path.expanduser(pattern)
     path = path.rstrip("/")
-    if pattern.endswith("/**"):
-        base = pattern[:-3].rstrip("/")
-        return path == base or path.startswith(base + "/")
-    return fnmatch.fnmatch(path, pattern)
+    for pat in _pattern_variants(pattern):
+        if pat.endswith("/**"):
+            base = pat[:-3].rstrip("/")
+            if any(ch in base for ch in "*?["):
+                if fnmatch.fnmatch(path, base) or fnmatch.fnmatch(path, base + "/*"):
+                    return True
+            elif path == base or path.startswith(base + "/"):
+                return True
+        elif fnmatch.fnmatch(path, pat):
+            return True
+    return False
 
 
 def is_excluded(entries, project_key=None, project_dir=None, munged_dir=None):
@@ -59,8 +78,11 @@ def is_excluded(entries, project_key=None, project_dir=None, munged_dir=None):
 
     - project_key: 正規化済みキー(完全一致エントリと比較)
     - project_dir: cwd等の実パス(パスglobエントリと比較)
-    - munged_dir: auto memory のように実パスが失われ munged 名しか無い場合に渡す。
-      パスglobは '<base>/**' 形式に限り munged 名へ変換してプレフィックス比較する
+    - munged_dir: 実パスが解決できず munged 名しか無い場合のフォールバック。
+      パスglobは '<base>/**' 形式に限り munged 名へ変換してプレフィックス比較する。
+      注意: mungingは記号を'-'に潰すため '~/private/**' が '~/private-notes' のような
+      隣接ディレクトリにも一致しうる(過剰側に倒れる)。実パスが解決できる場合は
+      munged_dir を渡さないこと
     """
     for e in entries:
         if e.startswith(("/", "~")):

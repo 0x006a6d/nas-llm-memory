@@ -208,10 +208,13 @@ def fail(run_id, msg: str):
 def project_dir_name(project_key: str) -> str:
     """project_key → memory/配下のディレクトリ名(パス安全化)"""
     safe = re.sub(r"[^A-Za-z0-9._-]", "-", project_key).strip("-")
+    # '.'/'..' はパストラバーサルになる(例: memory/../ へ書く・消す)ため必ずハッシュ形へ
+    if safe in ("", ".", ".."):
+        return f"unknown-{hashlib.sha1(project_key.encode()).hexdigest()[:8]}"
     if safe == project_key:
-        return safe or "unknown"
+        return safe
     # 置換で別キー同士('a/b'と'a-b'等)が同名に潰れないよう元キーのハッシュで一意化
-    return f"{safe or 'unknown'}-{hashlib.sha1(project_key.encode()).hexdigest()[:8]}"
+    return f"{safe}-{hashlib.sha1(project_key.encode()).hexdigest()[:8]}"
 
 
 def fetch_turns(project: str, lo: int, hi: int) -> list:
@@ -469,11 +472,15 @@ def main():
 
         turns_processed = int(psql(
             f"SELECT count(*) FROM turns WHERE id > {wm_turn} AND id <= {max_turn};"))
-        # agent別のturns内訳(Codex追補§4: どちらのエージェント由来の知識が多いかの計測)
-        agents = psql(
-            f"SELECT string_agg(agent || ':' || n, ' ') FROM "
-            f"(SELECT agent, count(*) AS n FROM turns "
-            f" WHERE id > {wm_turn} AND id <= {max_turn} GROUP BY agent ORDER BY agent) a;")
+        # agent別のturns内訳(Codex追補§4: どちらのエージェント由来の知識が多いかの計測)。
+        # 計測は本筋ではない: publish後にrunを失敗へ倒さないよう失敗は握りつぶす
+        try:
+            agents = psql(
+                f"SELECT string_agg(agent || ':' || n, ' ') FROM "
+                f"(SELECT agent, count(*) AS n FROM turns "
+                f" WHERE id > {wm_turn} AND id <= {max_turn} GROUP BY agent ORDER BY agent) a;")
+        except Exception:
+            agents = None  # agent列が未適用(schema 006前)でも本筋は続行
         notes = (f"inserted={total_inserted} projects={len(projects)}"
                  + (f" agents=({agents})" if agents else ""))
         psql(f"UPDATE batch_runs SET finished_at=now(), status='success', "

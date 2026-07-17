@@ -9,5 +9,11 @@
 #   - '/' か '~' で始まる行: パスglob。'~/private/**' は ~/private 自身と配下すべて
 #   - それ以外: project_key 完全一致(例: github.com/user/repo、ディレクトリ名)
 #
+# 確実に除外したい場合はパスglobを推奨:
+#   - project_key(gitリモート由来)の一致は、端末側でgitリモート取得が一時的に
+#     失敗するとディレクトリ名ベースの弱い判定に落ちる
+#   - munged名(記号が'-'に潰れた形)でしか判定できない古いデータでは、
+#     '~/private/**' が '~/private-notes' のような隣接ディレクトリにも一致しうる(過剰側)
+#
 # すでに収集済みのデータを消すには NAS で: python3 /volume2/claude-system/batch/purge.py --project <key>
 # 一時的にセッション単位で止めるには: NAS_MEMORY_DISABLE=1 でclaude を起動

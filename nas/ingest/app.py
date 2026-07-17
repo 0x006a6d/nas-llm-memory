@@ -153,12 +153,15 @@ async def ingest(request: Request) -> dict:
     # 収集除外(§8.3 第二防衛線)。200で応えて何も保存しない:
     # エラーにすると古い除外リストの端末のスプールが詰まり、後続の送信まで止まるため
     entries = exclude_entries()
+    project_dir = payload.get("project_dir") or ""
+    # 旧仕様のauto_memoryはproject_dirがmunged名(絶対パスでない)。その場合のみ
+    # mungedフォールバック判定を使う(新仕様は実cwdが入り、通常判定が効く)
+    munged = project_dir if kind == "auto_memory" and not project_dir.startswith("/") else None
     if entries and is_excluded(
         entries,
-        project_key=normalize_project_key(
-            payload.get("git_remote_url"), payload.get("project_dir")),
-        project_dir=payload.get("project_dir"),
-        munged_dir=payload.get("project_dir") if kind == "auto_memory" else None,
+        project_key=normalize_project_key(payload.get("git_remote_url"), project_dir),
+        project_dir=project_dir if project_dir.startswith("/") else None,
+        munged_dir=munged,
     ):
         return {"excluded": True}
 
