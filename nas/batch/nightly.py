@@ -12,6 +12,8 @@
 初回データ移行(追補設計書):
   --init-watermark     バックフィル投入後に一度実行。既存データを定常バッチの対象外にする
   --backfill-distill N 過去分をプロジェクト×月チャンクで1晩Nチャンクずつ蒸留(古い月から)
+  --extend-watermark   端末追加時のバックフィル後に実行。watermark-initを現時点まで進め、
+                       投入済みの過去分を定常バッチではなくbackfill-distillへ回す
 """
 import fcntl
 import hashlib
@@ -524,6 +526,67 @@ def init_watermark(force: bool = False):
         f"定常バッチの対象外(--backfill-distill で蒸留する)")
 
 
+def extend_watermark(yes: bool = False):
+    """端末追加時のバックフィル後に実行: watermark-initを現時点まで進める。
+
+    進めた範囲の未処理turns/snapshotsはすべて「過去分」扱いになり、
+    定常バッチ(翌晩に一括処理)ではなくbackfill-distillが
+    鮮度逆転防止付きで蒸留する。実行前にdevice別内訳を表示して確認を取る。
+
+    注意: backfill完了済み(completed)プロジェクトの新規turnsが範囲に含まれる場合、
+    それらは定常バッチからもdistillからも漏れる。その場合は中止し、
+    先に定常バッチ(nightly.sh)に処理させてから再実行すること。
+    """
+    row = psql("SELECT id, coalesce(watermark_turn_id,0), coalesce(watermark_snapshot_id,0) "
+               "FROM batch_runs WHERE status='success' AND notes='watermark-init' "
+               "ORDER BY id LIMIT 1;")
+    if not row:
+        print("FAILED: watermark-init がありません。初回は --init-watermark を実行してください",
+              file=sys.stderr)
+        sys.exit(1)
+    init_id, wm_t, wm_s = (int(x) for x in row.split("|"))
+    max_t = int(psql("SELECT coalesce(max(id),0) FROM turns;"))
+    max_s = int(psql("SELECT coalesce(max(id),0) FROM auto_memory_snapshots;"))
+    # 定常バッチが既にwatermark-initより先まで処理している場合、そこまでは戻せない
+    # (処理済み範囲をdistillに回すと二重蒸留になる)。現在の実効watermarkを起点に表示する
+    eff_t = int(psql("SELECT coalesce(max(watermark_turn_id),0) FROM batch_runs "
+                     "WHERE status='success';"))
+    if max_t <= max(wm_t, eff_t) and max_s <= wm_s:
+        print("拡張対象がありません(watermark以降の未処理データなし)")
+        return
+
+    print(f"watermark拡張: turns {wm_t} -> {max_t}, snapshots {wm_s} -> {max_s}")
+    breakdown = psql(
+        f"SELECT device || ' / ' || agent || ': ' || count(*) FROM turns "
+        f"WHERE id > {max(wm_t, eff_t)} GROUP BY device, agent ORDER BY 1;")
+    print("distill送りになる未処理turns(device / agent別):")
+    print("  " + breakdown.replace("\n", "\n  ") if breakdown else "  (なし)")
+
+    leaked = psql(
+        f"SELECT string_agg(DISTINCT t.project_key, ', ') FROM turns t "
+        f"JOIN backfill_progress b ON b.project_key = t.project_key AND b.completed "
+        f"WHERE t.id > {max(wm_t, eff_t)};")
+    if leaked:
+        print(f"FAILED: backfill完了済みプロジェクト({leaked})の未処理turnsが含まれます。"
+              f"拡張するとどの経路からも蒸留されなくなるため中止します。\n"
+              f"先に定常バッチに処理させてから( /volume2/claude-system/batch/nightly.sh を実行)"
+              f"再実行してください", file=sys.stderr)
+        sys.exit(1)
+
+    if not yes:
+        try:
+            ans = input("進めますか? [yes/N] ")
+        except EOFError:  # 非対話実行(stdin無し)は中止扱い
+            ans = ""
+        if ans.strip().lower() != "yes":
+            print("中止しました")
+            return
+    psql(f"UPDATE batch_runs SET watermark_turn_id={max_t}, watermark_snapshot_id={max_s} "
+         f"WHERE id={init_id};")
+    log(f"watermark extended: turns id<={max_t} / snapshots id<={max_s} は"
+        f"backfill-distillが蒸留する(cron 05:00)")
+
+
 def backfill_boundary():
     """バックフィル対象の上限ID = watermark-init runのwatermark。
 
@@ -717,7 +780,10 @@ if __name__ == "__main__":
         init_watermark(force="--force" in argv[1:])
     elif argv[0] == "--backfill-distill":
         backfill_main(int(argv[1]) if len(argv) > 1 else 2)
+    elif argv[0] == "--extend-watermark":
+        extend_watermark(yes="--yes" in argv[1:])
     else:
-        print("usage: nightly.py [--init-watermark [--force] | --backfill-distill [チャンク数/晩]]",
+        print("usage: nightly.py [--init-watermark [--force] | --backfill-distill [チャンク数/晩] "
+              "| --extend-watermark [--yes]]",
               file=sys.stderr)
         sys.exit(2)

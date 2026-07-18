@@ -97,6 +97,7 @@ OpenAI Codex CLI のセッションも同じ経路に載る (`docs` の追補設
 1. 各端末で `terminal/setup/backfill-claude.sh` を実行 (過去トランスクリプトと auto memory をスプールへ。送信は sender 任せ、再実行無害)
 2. 送信が済んだら NAS で `nightly.py --init-watermark` を一度実行 (過去分を定常バッチの対象外にする)
 3. 過去分の蒸留は `nightly.py --backfill-distill 2` を夜間に回す (プロジェクト×月チャンク、アクティブ優先、既存事実と矛盾する過去の事実は常に負ける)。`nas/batch/crontab.txt` のコメント行を有効化し、全プロジェクト完了で外す
+4. **後から端末を追加した場合**: 新端末で backfill-claude.sh → sender 送信後、NAS で `nightly.py --extend-watermark` を実行する (watermark-init を現時点まで進め、投入分を distill 経路へ回す。device 別内訳を表示して確認、backfill 完了済みプロジェクトの turns が混ざる場合は安全側に中止する)
 
 ## 前提
 
