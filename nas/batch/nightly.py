@@ -533,10 +533,20 @@ def extend_watermark(yes: bool = False):
     定常バッチ(翌晩に一括処理)ではなくbackfill-distillが
     鮮度逆転防止付きで蒸留する。実行前にdevice別内訳を表示して確認を取る。
 
-    注意: backfill完了済み(completed)プロジェクトの新規turnsが範囲に含まれる場合、
-    それらは定常バッチからもdistillからも漏れる。その場合は中止し、
-    先に定常バッチ(nightly.sh)に処理させてから再実行すること。
+    注意:
+    - backfill完了済み(completed)プロジェクトの新規turns/snapshotが範囲に含まれる
+      場合、それらは定常バッチからもdistillからも漏れるため中止する。
+      先に定常バッチ(nightly.sh)に処理させてから再実行すること
+    - 定常バッチが既にwatermark-initより先(eff)まで処理済みの場合、
+      境界拡張により (init, eff] の処理済み範囲も未完了プロジェクトの
+      distill対象に含まれる。重複はORGANIZE(prefer_existing)がskipするため
+      実害は再検証のLLMコストのみ。件数を表示して判断材料にする
     """
+    lock = acquire_lock()  # nightly/distill/purgeと同じ排他(検査〜更新の競合防止)
+    if lock is None:
+        print("FAILED: nightly/backfillが実行中です。終了後に再実行してください",
+              file=sys.stderr)
+        sys.exit(1)
     row = psql("SELECT id, coalesce(watermark_turn_id,0), coalesce(watermark_snapshot_id,0) "
                "FROM batch_runs WHERE status='success' AND notes='watermark-init' "
                "ORDER BY id LIMIT 1;")
@@ -547,28 +557,41 @@ def extend_watermark(yes: bool = False):
     init_id, wm_t, wm_s = (int(x) for x in row.split("|"))
     max_t = int(psql("SELECT coalesce(max(id),0) FROM turns;"))
     max_s = int(psql("SELECT coalesce(max(id),0) FROM auto_memory_snapshots;"))
-    # 定常バッチが既にwatermark-initより先まで処理している場合、そこまでは戻せない
-    # (処理済み範囲をdistillに回すと二重蒸留になる)。現在の実効watermarkを起点に表示する
-    eff_t = int(psql("SELECT coalesce(max(watermark_turn_id),0) FROM batch_runs "
-                     "WHERE status='success';"))
-    if max_t <= max(wm_t, eff_t) and max_s <= wm_s:
+    # 定常バッチの実効watermark(turns/snapshots両方)。未処理=これより上
+    eff = psql("SELECT coalesce(max(watermark_turn_id),0), coalesce(max(watermark_snapshot_id),0) "
+               "FROM batch_runs WHERE status='success';").split("|")
+    eff_t, eff_s = max(wm_t, int(eff[0])), max(wm_s, int(eff[1]))
+    if max_t <= eff_t and max_s <= eff_s:
         print("拡張対象がありません(watermark以降の未処理データなし)")
         return
 
     print(f"watermark拡張: turns {wm_t} -> {max_t}, snapshots {wm_s} -> {max_s}")
     breakdown = psql(
         f"SELECT device || ' / ' || agent || ': ' || count(*) FROM turns "
-        f"WHERE id > {max(wm_t, eff_t)} GROUP BY device, agent ORDER BY 1;")
+        f"WHERE id > {eff_t} GROUP BY device, agent ORDER BY 1;")
     print("distill送りになる未処理turns(device / agent別):")
     print("  " + breakdown.replace("\n", "\n  ") if breakdown else "  (なし)")
+    n_snap = int(psql(f"SELECT count(*) FROM auto_memory_snapshots WHERE id > {eff_s};"))
+    if n_snap:
+        print(f"未処理snapshots: {n_snap}件")
+    # 定常バッチ処理済み範囲が境界拡張で未完了プロジェクトのdistill対象に戻る件数(参考)
+    redo = int(psql(f"SELECT count(*) FROM turns WHERE id > {wm_t} AND id <= {eff_t};"))
+    if redo:
+        print(f"参考: 定常バッチ処理済みの{redo}件も未完了プロジェクトのdistill走査対象に"
+              f"含まれる(重複factはORGANIZEがskip。コストは再検証分のみ)")
 
+    # completed済みプロジェクトの混入検査(turnsとsnapshotsの両方)
     leaked = psql(
-        f"SELECT string_agg(DISTINCT t.project_key, ', ') FROM turns t "
+        f"SELECT string_agg(DISTINCT k, ', ') FROM ("
+        f"SELECT t.project_key AS k FROM turns t "
         f"JOIN backfill_progress b ON b.project_key = t.project_key AND b.completed "
-        f"WHERE t.id > {max(wm_t, eff_t)};")
+        f"WHERE t.id > {eff_t} "
+        f"UNION SELECT s.project_key FROM auto_memory_snapshots s "
+        f"JOIN backfill_progress b ON b.project_key = s.project_key AND b.completed "
+        f"WHERE s.id > {eff_s}) u;")
     if leaked:
-        print(f"FAILED: backfill完了済みプロジェクト({leaked})の未処理turnsが含まれます。"
-              f"拡張するとどの経路からも蒸留されなくなるため中止します。\n"
+        print(f"FAILED: backfill完了済みプロジェクト({leaked})の未処理turns/snapshotが"
+              f"含まれます。拡張するとどの経路からも蒸留されなくなるため中止します。\n"
               f"先に定常バッチに処理させてから( /volume2/claude-system/batch/nightly.sh を実行)"
               f"再実行してください", file=sys.stderr)
         sys.exit(1)
