@@ -383,10 +383,14 @@ def _judge_with_shortlist(key: str, cands: list, rule: str, default: dict):
 
     prompts = 0
     pos = 0
+    # バジェットはテンプレート・規則文込みで判定する。1ブロックは候補(≤1000字)+
+    # K件のshortlist(各≤1000字)で高々十数KBに有界なので、単一ブロックが
+    # バジェットを超えても1プロンプト1ブロックとして送れば呼び出し限界には達しない
+    overhead = len(ORGANIZE_PROMPT) + len(rule)
     while pos < len(judged):
         batch: list = []      # このプロンプトに載せる元候補index
         blocks: list = []
-        size = 0
+        size = overhead
         while pos < len(judged):
             i = judged[pos]
             lines = [f"[{len(batch)}] 候補: {cands[i]['content']}", "    照合対象:"]
@@ -471,8 +475,13 @@ def organize_and_insert(project: str, candidates: list, run_id: int,
                 n_skip += 1
                 continue
             rep = d.get("replaces")
-            if prefer_existing:
-                rep = None  # バックフィル由来の事実に既存を置き換えさせない(鮮度の逆転防止)
+            if prefer_existing and rep is not None:
+                # バックフィルで「既存を置き換えるべき」とLLMが判断した候補は、
+                # replacesをNULL化して挿入すると古い矛盾候補がcurrent factとして
+                # 並存してしまう。鮮度の逆転防止のため候補ごとskipする
+                dropped += 1
+                n_skip += 1
+                continue
             rep_sql = str(rep) if isinstance(rep, int) and rep in allow else "NULL"
             prov_sql = "ARRAY[" + ",".join(map(str, c["provenance"])) + "]::bigint[]" \
                 if c["provenance"] else "ARRAY[]::bigint[]"
