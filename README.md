@@ -38,7 +38,7 @@
 - `raw_payloads` — 受信生データ (マスク済み)。パース失敗時の保険
 - `turns` — 生ログ層。append-only
 - `auto_memory_snapshots` — Claude Code の auto memory ファイルのスナップショット
-- `facts` — 事実層。UPDATE せず `replaces` で系譜管理し、`current_facts` ビューが現在有効な事実を返す
+- `facts` — 事実層。UPDATE せず `replaces` で系譜管理し、`current_facts` ビューが現在有効な事実を返す。類似 fact は週次の `batch/compact.py` が統合する (統合 fact が新しい側を `replaces`、古い側に `retired_by` を刻む。削除なしで系譜は双方向に追える)
 - `batch_runs` — バッチ実行記録 + watermark
 
 ## 運用して踏んだ罠と対策 (実装済み)
@@ -55,7 +55,7 @@ NAS 側: `nas/` を配置し、`ingest/secrets/` に `api_token` と `db_passwor
 cd nas
 for f in ingest/schema/001_init.sql ingest/schema/003_p2.sql \
          ingest/schema/004_event_id.sql ingest/schema/005_backfill.sql \
-         ingest/schema/006_agent.sql; do
+         ingest/schema/006_agent.sql ingest/schema/007_retired.sql; do
   docker compose exec -T db psql -U claude -d claude_memory -v ON_ERROR_STOP=1 -f - < "$f"
 done
 ```

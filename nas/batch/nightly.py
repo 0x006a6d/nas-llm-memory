@@ -325,6 +325,7 @@ def verify_project(project: str, turns: list, memories: list, run_id: int):
 
 ORGANIZE_SHORTLIST_K = 10        # 追補§2: dedupは実効3〜5件で足りる想定だがrecall側に倒す
 ORGANIZE_BUDGET_CHARS = 50_000   # 二段目1プロンプトのブロック上限(超えたら候補列を分割)
+ENRICH_MAX_FACTS = 300           # 追補§5: ENRICH入力の上限件数(60KBに収まる実測値の初期値)
 
 _PGROONGA_OK = None
 
@@ -361,6 +362,7 @@ def shortlist_facts(key: str, content: str, k: int = ORGANIZE_SHORTLIST_K) -> li
         f"SELECT json_build_object('id', id, 'content', content) AS j "
         f"FROM facts f "
         f"WHERE f.project_key={q(key)} "
+        f"AND f.retired_by IS NULL "
         f"AND NOT EXISTS (SELECT 1 FROM facts g WHERE g.replaces = f.id) "
         f"AND f.content &@* {q(content)} "
         f"ORDER BY pgroonga_score(tableoid, ctid) DESC LIMIT {k}) t;"
@@ -502,11 +504,23 @@ def organize_and_insert(project: str, candidates: list, run_id: int,
 
 
 def enrich(project_key: str) -> int:
-    """current_facts → index.md 生成。生成行数を返す(0=事実なしでスキップ)。"""
+    """current_facts → index.md 生成。生成行数を返す(0=事実なしでスキップ)。
+
+    入力選別(追補§5): verified優先+新しい順の上位ENRICH_MAX_FACTS件に絞る。
+    切り捨てを「60KB切り詰めの文字数の偶然」から「明示した優先順位」に変える。
+    """
+    total = int(psql(f"SELECT count(*) FROM current_facts WHERE project_key={q(project_key)};"))
+    if total > ENRICH_MAX_FACTS:
+        log(f"  WARN: {project_key} のfacts {total}件が上限{ENRICH_MAX_FACTS}を超過。"
+            f"unverified・古い側はindex対象外(compact.py での統合を推奨)")
     facts = psql_json(
-        f"SELECT json_agg(json_build_object('id', id, 'status', status, "
-        f"'date', to_char(created_at, 'YYYY-MM-DD'), 'content', content) ORDER BY created_at DESC) "
-        f"FROM current_facts WHERE project_key={q(project_key)};"
+        f"SELECT json_agg(j ORDER BY vr DESC, ca DESC) FROM ("
+        f"SELECT (status='verified')::int AS vr, created_at AS ca, "
+        f"json_build_object('id', id, 'status', status, "
+        f"'date', to_char(created_at, 'YYYY-MM-DD'), 'content', content) AS j "
+        f"FROM current_facts WHERE project_key={q(project_key)} "
+        f"ORDER BY (status='verified') DESC, created_at DESC "
+        f"LIMIT {ENRICH_MAX_FACTS}) t;"
     ) or []
     if not facts:
         return 0
