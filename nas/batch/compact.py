@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nightly import (SYSTEM_DIR, acquire_lock, ask_claude, extract_json, log,
+from nightly import (acquire_lock, ask_claude, extract_json, log,
                      pgroonga_ok, psql, psql_json, publish, pull_repo, q)
 
 PAIRS_MAX = 40  # 1 keyあたり1回の実行で判定する類似ペアの上限(予算制)
@@ -69,21 +69,26 @@ def list_pairs(key: str, limit: int) -> list:
 
 
 def merge_pair(key: str, p: dict, content: str, run_label: str) -> int:
-    """統合factを挿入し、新しい側をreplaces・古い側をretired_byで退役させる。"""
+    """統合factを挿入し、新しい側をreplaces・古い側をretired_byで退役させる。
+
+    挿入と退役マークはデータ変更CTEの1文で原子的に行う: 途中でプロセスが落ちると
+    「統合factと古い側が両方current」の重複状態が残るため。
+    retired_byのUPDATEはappend-only原則の例外(redact/purgeと並ぶ第3の例外)。
+    """
     new_id, old_id = max(p["a_id"], p["b_id"]), min(p["a_id"], p["b_id"])
     status = "verified" if p["a_st"] == "verified" and p["b_st"] == "verified" else "unverified"
     confs = [c for c in (p["a_conf"], p["b_conf"]) if c is not None]
     conf_sql = str(round(min(confs), 3)) if confs else "NULL"
-    merged_id = int(psql(
+    return int(psql(
+        f"WITH m AS ("
         f"INSERT INTO facts (project_key, content, status, provenance, confidence, replaces, created_by) "
         f"SELECT {q(key)}, {q(content)}, {q(status)}, "
         f"(SELECT coalesce(array_agg(DISTINCT x), ARRAY[]::bigint[]) FROM ("
         f"  SELECT unnest(provenance) AS x FROM facts WHERE id IN ({p['a_id']}, {p['b_id']})) u), "
         f"{conf_sql}, {new_id}, {q(run_label)} "
-        f"RETURNING id;"))
-    # append-only原則の例外(redact/purgeと並ぶ): 統合による退役マークのみ許す
-    psql(f"UPDATE facts SET retired_by = {merged_id} WHERE id = {old_id};")
-    return merged_id
+        f"RETURNING id) "
+        f"UPDATE facts SET retired_by = (SELECT id FROM m) WHERE id = {old_id} "
+        f"RETURNING retired_by;"))
 
 
 def compact_key(key: str, pairs_max: int, yes: bool, run_label: str) -> tuple:
@@ -156,11 +161,10 @@ def main():
         if merged:
             touched.add(key)
         if n_pairs:
-            line = (f"{time.strftime('%F %T')} compact {key}: "
-                    f"pairs={n_pairs} merged={merged} kept={kept}")
-            print(line)
-            with open(SYSTEM_DIR / "batch" / "compact.log", "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+            # ログはnightly.shと同じ方式: スクリプトはstdoutへ、cron側のリダイレクトが
+            # compact.log を所有する(スクリプト内でも追記すると二重出力になる)
+            print(f"{time.strftime('%F %T')} compact {key}: "
+                  f"pairs={n_pairs} merged={merged} kept={kept}")
 
     # 統合したkeyのindexを再生成して配布する(次のnightlyまで古いindexが
     # 配布され続けるのを避ける)。失敗してもfactsの統合は確定済みで、
