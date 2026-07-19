@@ -14,5 +14,8 @@
 # 全プロジェクトが「backfill完了」になったら行ごと削除する
 #0 5 * * *  /volume2/claude-system/batch/nightly.sh --backfill-distill 2 >> /volume2/claude-system/batch/backfill.log 2>&1
 
+# 類似factの統合(ORGANIZE二段照合化 追補§4)。週次・日曜06:00(夜間バッチ後)
+0 6 * * 0  python3 /volume2/claude-system/batch/compact.py --yes >> /volume2/claude-system/batch/compact.log 2>&1
+
 # sender(NAS自身も端末として送信 — 設計書§8)
 17 * * * *  python3 /volume1/homes/NAS_USER/claude-config/hooks/sender.py
