@@ -4,4 +4,7 @@
 # ここではバックグラウンド起動だけしてセッション開始をブロックしない。
 CONFIG_DIR=$(cd -- "$(dirname -- "$0")/.." && pwd) || exit 0
 ( python3 "$CONFIG_DIR/hooks/sync_worker.py" "$CONFIG_DIR" >/dev/null 2>&1 & ) >/dev/null 2>&1
+# 申し送り(messages)の未読をコンテキストへ注入する。ここだけインライン実行:
+# 注入はセッション開始時にしかできない。NAS不達時はcurl --max-timeで数秒内に素通し
+python3 "$CONFIG_DIR/hooks/inbox_check.py" 2>/dev/null
 exit 0

@@ -241,3 +241,75 @@ def _parse_and_insert(conn, kind: str, payload: dict, payload_id: int) -> dict:
         result = {"payload_id": payload_id, "inserted": cur.rowcount}
     conn.execute("UPDATE raw_payloads SET parsed_at = now() WHERE id = %s", (payload_id,))
     return result
+
+
+# ---------------------------------------------------------------- 申し送り(messages)
+
+MESSAGE_BODY_MAX = 4000
+
+
+@app.post("/message", dependencies=[Depends(require_token)])
+async def message(request: Request) -> dict:
+    """端末間の申し送りを登録する。宛先は受信側の照合条件(NULL=不問)。"""
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid json")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    raw_body = payload.get("body")
+    if not isinstance(raw_body, str):
+        raise HTTPException(status_code=400, detail="body must be a string")
+    body = raw_body.strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="body required")
+    # 切り詰めではなく拒否: 切り詰めると境界をまたぐ秘密情報がマスクを逃れる
+    if len(body) > MESSAGE_BODY_MAX:
+        raise HTTPException(status_code=400, detail="body too long")
+    with pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO messages (from_device, to_device, to_project, body) "
+            "VALUES (%s, %s, %s, %s) RETURNING id",
+            (
+                str(payload.get("from_device") or "unknown"),
+                str(payload.get("to_device")) if payload.get("to_device") else None,
+                str(payload.get("to_project")) if payload.get("to_project") else None,
+                mask_text(body),
+            ),
+        ).fetchone()
+    return {"id": row[0]}
+
+
+@app.post("/inbox", dependencies=[Depends(require_token)])
+async def inbox(request: Request) -> dict:
+    """自分(device×project)宛ての未読を取り出し、既読化して返す。
+
+    取り出しと既読化は1文で原子的に行う(SKIP LOCKEDで同時起動セッションの
+    二重注入を防ぐ)。project_keyの解決は収集経路と同じ正規化を使う。
+    """
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid json")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    device = str(payload.get("device") or "unknown")
+    project_key = normalize_project_key(payload.get("git_remote_url"),
+                                        payload.get("project_dir"), device)
+    with pool.connection() as conn:
+        rows = conn.execute(
+            # UPDATE ... RETURNINGの行順は不定のためCTEで包み、外側でid順に確定させる
+            "WITH claimed AS ("
+            "UPDATE messages SET read_at = now() WHERE id IN ("
+            "SELECT id FROM messages WHERE read_at IS NULL "
+            "AND (to_device IS NULL OR to_device = %s) "
+            "AND (to_project IS NULL OR to_project = %s) "
+            "ORDER BY id LIMIT 20 FOR UPDATE SKIP LOCKED) "
+            "RETURNING id, from_device, created_at, body) "
+            "SELECT id, from_device, to_char(created_at, 'MM-DD HH24:MI'), body "
+            "FROM claimed ORDER BY id",
+            (device, project_key),
+        ).fetchall()
+    return {"messages": [
+        {"id": r[0], "from": r[1], "at": r[2], "body": r[3]} for r in rows
+    ]}
