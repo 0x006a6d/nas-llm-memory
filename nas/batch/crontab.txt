@@ -17,5 +17,8 @@
 # 類似factの統合(ORGANIZE二段照合化 追補§4)。週次・日曜06:00(夜間バッチ後)
 0 6 * * 0  python3 /volume2/claude-system/batch/compact.py --yes >> /volume2/claude-system/batch/compact.log 2>&1
 
+# 補足関係(fact_edges)の付与。日次05:30(夜間バッチ後)。未判定ペアが無ければ即終了
+30 5 * * *  python3 /volume2/claude-system/batch/edges_backfill.py --yes >> /volume2/claude-system/batch/edges.log 2>&1
+
 # sender(NAS自身も端末として送信 — 設計書§8)
 17 * * * *  python3 /volume1/homes/NAS_USER/claude-config/hooks/sender.py
