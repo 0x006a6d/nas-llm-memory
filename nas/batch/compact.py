@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nightly import (acquire_lock, ask_claude, extract_json, log,
+from nightly import (acquire_lock, ask_claude, edges_ok, extract_json, log,
                      pgroonga_ok, psql, psql_json, publish, pull_repo, q)
 
 PAIRS_MAX = 40  # 1 keyあたり1回の実行で判定する類似ペアの上限(予算制)
@@ -79,6 +79,25 @@ def merge_pair(key: str, p: dict, content: str, run_label: str) -> int:
     status = "verified" if p["a_st"] == "verified" and p["b_st"] == "verified" else "unverified"
     confs = [c for c in (p["a_conf"], p["b_conf"]) if c is not None]
     conf_sql = str(round(min(confs), 3)) if confs else "NULL"
+    edge_cte = ""
+    if edges_ok():
+        # 両factに付いていたextendsを統合factへ付け替える(付け替えないと関連が退役側に取り残される)。
+        # 向きは常にfrom=統合factへ正規化(エッジは無向として扱うため方向は保存しない)。
+        # noneは付け替えない(統合で内容が変わるため判定を持ち越さない)。
+        # ペア内部のエッジ(A-B間)は付け替え先が無意味なので除外する
+        edge_cte = (
+            f", e AS ("
+            f"INSERT INTO fact_edges (from_id, to_id, type, created_by) "
+            f"SELECT DISTINCT (SELECT id FROM m), "
+            f"CASE WHEN fe.from_id IN ({old_id}, {new_id}) THEN fe.to_id ELSE fe.from_id END, "
+            f"'extends', {q(run_label)} "
+            f"FROM fact_edges fe "
+            f"WHERE (fe.from_id IN ({old_id}, {new_id}) OR fe.to_id IN ({old_id}, {new_id})) "
+            f"AND fe.type = 'extends' "
+            f"AND CASE WHEN fe.from_id IN ({old_id}, {new_id}) THEN fe.to_id ELSE fe.from_id END "
+            f"NOT IN ({old_id}, {new_id}) "
+            f"ON CONFLICT DO NOTHING)"
+        )
     return int(psql(
         f"WITH m AS ("
         f"INSERT INTO facts (project_key, content, status, provenance, confidence, replaces, created_by) "
@@ -86,7 +105,8 @@ def merge_pair(key: str, p: dict, content: str, run_label: str) -> int:
         f"(SELECT coalesce(array_agg(DISTINCT x), ARRAY[]::bigint[]) FROM ("
         f"  SELECT unnest(provenance) AS x FROM facts WHERE id IN ({p['a_id']}, {p['b_id']})) u), "
         f"{conf_sql}, {new_id}, {q(run_label)} "
-        f"RETURNING id) "
+        f"RETURNING id)"
+        f"{edge_cte} "
         f"UPDATE facts SET retired_by = (SELECT id FROM m) WHERE id = {old_id} "
         f"RETURNING retired_by;"))
 
