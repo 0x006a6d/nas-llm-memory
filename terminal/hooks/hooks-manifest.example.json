@@ -1,0 +1,41 @@
+{
+  "_comment": "hooks-manifest.json のサンプル。実物は配布リポジトリ(claude-config)側に置き、公開リポにはこの example だけを置く。hooks_apply.py がこれを Claude Code(~/.claude/settings.json)と Codex(~/.codex/hooks.json)へ展開する。",
+  "hooks": [
+    {
+      "name": "セッション終了時の収集",
+      "event": "SessionEnd",
+      "command": "python3 $HOME/claude-config/hooks/spool_write.py",
+      "targets": ["claude"],
+      "matcher": null,
+      "if": null,
+      "timeout": null
+    },
+    {
+      "name": "セッション開始処理",
+      "event": "SessionStart",
+      "command": "$HOME/claude-config/hooks/session_start.sh",
+      "targets": ["claude"],
+      "matcher": null,
+      "if": null,
+      "timeout": null
+    },
+    {
+      "name": "push 前の注意注入(if 条件は Codex ではラッパー化される)",
+      "event": "PreToolUse",
+      "command": "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[example] push の前にテストを実行したか確認すること。\"}}'",
+      "targets": ["claude", "codex"],
+      "matcher": "Bash",
+      "if": "Bash(git push*)",
+      "timeout": 10
+    },
+    {
+      "name": "毎プロンプトの注意注入",
+      "event": "UserPromptSubmit",
+      "command": "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", \"additionalContext\": \"[example] 事実確認をしてから回答すること。\"}}'",
+      "targets": ["codex"],
+      "matcher": null,
+      "if": null,
+      "timeout": 10
+    }
+  ]
+}

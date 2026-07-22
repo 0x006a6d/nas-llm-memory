@@ -161,7 +161,7 @@ def spool_codex():
         remote = _git_remote(cwd) if cwd and Path(cwd).is_dir() else None
         if not exclude.is_excluded(
                 excludes,
-                project_key=exclude.normalize_project_key(remote, cwd),
+                project_key=exclude.normalize_project_key(remote, cwd, device),
                 project_dir=cwd):
             # チャンクはturn_context/session_meta行を含まないことがあるため、
             # 「チャンク開始時点の最新model/cwd」を同梱してparserに引き継ぐ。

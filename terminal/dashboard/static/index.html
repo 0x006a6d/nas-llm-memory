@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>記憶統合 — 設定と中身</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="frame">
+  <aside class="rail">
+    <div class="rail-title">
+      <span class="rail-mark"></span>
+      <div>
+        <div class="rail-name">記憶統合</div>
+        <div class="rail-sub">nas-llm-memory</div>
+      </div>
+    </div>
+    <nav id="nav">
+      <a href="#overview" data-tab="overview">概要</a>
+      <a href="#context" data-tab="context">コンテキスト</a>
+      <a href="#facts" data-tab="facts">記憶 (facts)</a>
+      <a href="#skills" data-tab="skills">スキル</a>
+      <a href="#hooks" data-tab="hooks">Hooks</a>
+      <a href="#collect" data-tab="collect">収集設定</a>
+    </nav>
+    <div class="rail-foot" id="railFoot"></div>
+  </aside>
+
+  <main class="stage">
+    <header class="topbar">
+      <div id="topbarTitle" class="topbar-title"></div>
+      <div class="topbar-right">
+        <span id="nasStamp" class="stamp"></span>
+        <button id="refreshNas" class="btn ghost" title="NASから再取得">NAS更新</button>
+      </div>
+    </header>
+    <div id="content" class="content"></div>
+  </main>
+</div>
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

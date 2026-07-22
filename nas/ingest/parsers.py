@@ -54,7 +54,7 @@ def parse_transcript(payload: dict, payload_id: int) -> list[dict]:
     device = payload.get("device", "unknown")
     session_id = payload.get("session_id") or "unknown"
     project_key = normalize_project_key(
-        payload.get("git_remote_url"), payload.get("project_dir")
+        payload.get("git_remote_url"), payload.get("project_dir"), device
     )
     rows: list[dict] = []
     for line in (payload.get("transcript") or "").splitlines():
@@ -130,7 +130,7 @@ def parse_codex_rollout(payload: dict, payload_id: int) -> list[dict]:
     device = payload.get("device", "unknown")
     file_stem = payload.get("session_id") or "unknown"  # senderはrolloutファイル名(拡張子なし)を入れる
     project_key = normalize_project_key(
-        payload.get("git_remote_url"), payload.get("project_dir")
+        payload.get("git_remote_url"), payload.get("project_dir"), device
     )
     session_id = payload.get("codex_session_id")
     cwd = payload.get("context_cwd") or payload.get("project_dir")

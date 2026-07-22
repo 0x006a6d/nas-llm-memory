@@ -1,0 +1,25 @@
+{
+  "turns_by_project": [
+    {"project_key": "github.com/example/todo-app", "n": 412, "last_ts": "2026-07-21T22:14:03"},
+    {"project_key": "github.com/example/blog", "n": 168, "last_ts": "2026-07-20T09:41:55"},
+    {"project_key": "home-macbook", "n": 95, "last_ts": "2026-07-19T18:02:11"}
+  ],
+  "facts_by_project": [
+    {"project_key": "github.com/example/todo-app", "n": 2},
+    {"project_key": "github.com/example/blog", "n": 0},
+    {"project_key": "general", "n": 1}
+  ],
+  "batch_runs": [
+    {"id": 21, "started_at": "2026-07-21T03:30:01", "finished_at": "2026-07-21T03:34:12", "status": "success", "turns_processed": 96, "index_lines": 142, "notes": null},
+    {"id": 20, "started_at": "2026-07-20T03:30:01", "finished_at": "2026-07-20T03:33:40", "status": "success", "turns_processed": 71, "index_lines": 139, "notes": null}
+  ],
+  "auto_memory": [
+    {"id": 3, "device": "macbook", "project_key": "github.com/example/todo-app", "file_path": "~/.claude/projects/todo-app/memory.md", "file_mtime": "2026-07-21T20:00:00", "bytes": 2048}
+  ],
+  "devices_by_project": [
+    {"project_key": "github.com/example/todo-app", "device": "macbook", "n": 412},
+    {"project_key": "github.com/example/blog", "device": "nas", "n": 168},
+    {"project_key": "home-macbook", "device": "macbook", "n": 95}
+  ],
+  "fetched_at": "demo"
+}

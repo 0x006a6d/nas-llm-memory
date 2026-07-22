@@ -15,8 +15,17 @@ import re
 from pathlib import Path
 
 
-def normalize_project_key(git_remote_url, project_dir):
-    """ingest側 app.py と同じ正規化規約(設計原則5)。変更時は揃えること。"""
+# ホームディレクトリ直下(=git外の雑多なセッション)の判定。
+# fallbackのbasenameだとアカウント名(jm/jun等)が端末ごとに別キーで露出するため、
+# home-<端末名> に正規化する(2026-07-22)。
+_HOME_DIR_RE = re.compile(r"^(?:/Users/[^/]+|/home/[^/]+|/volume\d+/homes/[^/]+|/root)/?$")
+
+
+def normalize_project_key(git_remote_url, project_dir, device=None):
+    """ingest側と端末側で共有する正規化規約(設計原則5)。変更時は全コピーを揃えること。
+
+    device はホームディレクトリfallback時のみ使う(socket.gethostname()等)。
+    """
     if git_remote_url:
         key = git_remote_url.strip()
         key = re.sub(r"^[a-z+]+://", "", key)   # scheme除去
@@ -26,6 +35,9 @@ def normalize_project_key(git_remote_url, project_dir):
         key = re.sub(r"/+", "/", key).strip("/")
         return key.lower()
     if project_dir:
+        if _HOME_DIR_RE.match(str(project_dir)):
+            host = (device or "").split(".")[0].lower()
+            return f"home-{host}" if host else "home"
         return Path(project_dir).name or "unknown"
     return "unknown"
 
