@@ -1,0 +1,37 @@
+{
+  "_comment": "Claude Code 本体(バイナリ)内蔵のコンテキスト構成要素。バイナリ埋め込みのためファイル走査では列挙できず、セッション内の /context 出力から手動採取する。バージョンが上がったら /context を貼って更新すること。",
+  "captured_with": "2.1.218",
+  "captured_at": "2026-07-23",
+  "skills": [
+    {"name": "dataviz", "description": "チャート・グラフ・ダッシュボード作成前に読む設計ガイド"},
+    {"name": "claude-api", "description": "Claude API / Anthropic SDK リファレンス(モデルID・価格・ストリーミング等)"},
+    {"name": "update-config", "description": "settings.json の設定変更(hooks・permissions・env)"},
+    {"name": "claude-in-chrome", "description": "Chrome ブラウザ自動操作(mcp__claude-in-chrome__* の前提スキル)"},
+    {"name": "deep-research", "description": "深掘りリサーチ"},
+    {"name": "artifact-design", "description": "Artifact の設計・デザイン指針"},
+    {"name": "artifact-capabilities", "description": "Artifact 実行時 capability(ライブデータ・共有状態等)"},
+    {"name": "schedule", "description": "cron スケジュールで動くクラウドエージェント(routines)の管理"},
+    {"name": "run", "description": "プロジェクトのアプリを起動して変更を実際に確認する"},
+    {"name": "loop", "description": "プロンプト/コマンドの定期繰り返し実行"},
+    {"name": "keybindings-help", "description": "~/.claude/keybindings.json のキーバインド変更"},
+    {"name": "fewer-permission-prompts", "description": "許可プロンプト削減のための allowlist 追加"},
+    {"name": "simplify", "description": "変更コードの簡素化・再利用レビュー(バグ探索はしない)"},
+    {"name": "security-review", "description": "現在ブランチの変更のセキュリティレビュー"},
+    {"name": "review", "description": "GitHub PR のレビュー"},
+    {"name": "init", "description": "CLAUDE.md の新規作成"}
+  ],
+  "agents": [
+    {"name": "general-purpose", "description": "汎用エージェント(調査・複数ステップ作業)"},
+    {"name": "Explore", "description": "読み取り専用の広域探索(ファイル横断検索)"},
+    {"name": "Plan", "description": "実装計画を設計するアーキテクトエージェント"},
+    {"name": "claude", "description": "既定のキャッチオール"},
+    {"name": "claude-code-guide", "description": "Claude Code / Agent SDK / API の質問対応"},
+    {"name": "statusline-setup", "description": "ステータスライン設定"}
+  ],
+  "runtime": [
+    {"name": "System prompt", "description": "セッション開始時に本体が組み立てる。ファイル実体なし"},
+    {"name": "System tools", "description": "Bash/Edit/Read 等の内蔵ツール定義。ファイル実体なし"},
+    {"name": "MCP tools", "description": "接続中の MCP サーバ由来。claude.ai コネクタ(Gmail 等)・Chrome 拡張・computer-use はローカル設定ファイルに実体が無く、実行時に接続される"},
+    {"name": "Messages", "description": "会話履歴。NAS には turns として収集される(記憶タブで検索可)"}
+  ]
+}

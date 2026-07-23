@@ -17,6 +17,8 @@ const TABS = {
   facts: "記憶 (facts)",
   skills: "スキル",
   hooks: "Hooks",
+  routing: "配布",
+  messages: "申し送り",
   collect: "収集設定",
 };
 
@@ -67,6 +69,14 @@ function warnings() {
   for (const m of S.memory_indexes) {
     if (m.bytes > 32768) out.push({ kind: "warn", tag: "32KiB超",
       text: `${m.key}/index.md が ${kb(m.bytes)}。Codex 既定の project_doc_max_bytes (32KiB) を超えると連結合計で黙って打ち切られます(この MacBook は 64KiB に拡大済)。` });
+  }
+  const sc = S.skill_candidates || [];
+  if (sc.length) out.push({ kind: "info", tag: "スキル候補",
+    text: `未採用のスキル候補が ${sc.length} 件あります(スキルタブで確認。採用するときはセッションで「◯◯ を採用して」)。` });
+  const B = S.builtin || {};
+  if (B.captured_with && B.current_version && B.captured_with !== B.current_version) {
+    out.push({ kind: "info", tag: "内蔵一覧が古い",
+      text: `内蔵スキル一覧のスナップショットは claude ${B.captured_with} 時点、現在は ${B.current_version} です。セッションで /context を実行して dashboard/builtin-context.json を更新してください。` });
   }
   return out;
 }
@@ -427,17 +437,91 @@ function renderFacts(el) {
 }
 
 function renderSkills(el) {
-  const groups = {};
-  for (const s of S.skills) (groups[s.source] ??= []).push(s);
-  el.innerHTML = Object.entries(groups).map(([src, list]) => `
-    <h2 class="section">${esc(src)} — ${list.length} 件</h2>
+  if (staleServer(el)) return;
+  const cands = S.skill_candidates || [];
+  const candHtml = cands.length ? `
+    <h2 class="section">スキル候補(自動発掘・未採用) — ${cands.length} 件</h2>
+    <div class="note info"><span class="tag">仕組み</span><span>日次バッチが全端末のログから反復手順を発掘した候補です。ここにある間は何も発動しません。採用するときはセッションで「候補の ◯◯ を採用して」と言えば、下書きを検証・仕上げして skills/ に入ります。不要な候補は skills-candidates/ から削除してください。</span></div>
     <div class="card"><table>
-      <tr><th>名前</th><th>説明(SKILL.md frontmatter)</th><th style="text-align:right">サイズ</th></tr>
-      ${list.map((s) => `<tr>
-        <td class="mono" style="white-space:nowrap">${esc(s.name)}</td>
-        <td class="muted">${esc(s.description || "—")}</td>
-        <td class="num">${kb(s.bytes)}</td></tr>`).join("")}
-    </table></div>`).join("");
+      <tr><th>名前</th><th>種別</th><th>要約</th><th style="text-align:right">検出回数</th><th style="text-align:right">根拠turns</th><th>最終検出</th><th></th></tr>
+      ${cands.map((c, i) => `<tr>
+        <td class="mono" style="white-space:nowrap">${esc(c.name)}</td>
+        <td>${c.kind === "improve" ? `<span class="chip warn">改善: ${esc(c.target_skill || "")}</span>` : '<span class="chip blue">新規</span>'}</td>
+        <td class="muted">${esc(c.summary)}</td>
+        <td class="num">${esc(c.count)}</td>
+        <td class="num">${esc(c.evidence_n)}</td>
+        <td class="mono faint">${esc(c.updated)}</td>
+        <td>${c.draft ? `<button class="btn mini ghost cand-open" data-i="${i}">下書き</button>` : ""}</td>
+      </tr>
+      <tr class="cand-body" data-for="${i}" hidden><td colspan="7"><code class="block"></code></td></tr>`).join("")}
+    </table></div>` : "";
+
+  // 出所 → 見出しと編集可否。プラグインは cache 内の配布物なので編集対象にしない
+  function srcHead(src, list) {
+    const first = list[0] || {};
+    let label = src, chips = "";
+    if (src === "user") label = "user — ~/.claude/skills";
+    else if (src === "claude-config") label = "claude-config — git で全端末に配布";
+    else if (src.startsWith("project:")) label = `project — ${src.slice(8)}/.claude`;
+    else if (src.startsWith("plugin:")) label = `plugin — ${src.slice(7)}`;
+    chips += first.editable
+      ? ' <span class="chip ok">編集可(ファイル直接編集)</span>'
+      : ' <span class="chip warn">編集不可(プラグイン配布物・更新で上書き)</span>';
+    if (first.enabled === false) chips += ' <span class="chip err">無効(enabledPlugins)</span>';
+    return `${esc(label)} — ${list.length} 件${chips}`;
+  }
+
+  function grouped(items, nameHead) {
+    const groups = {};
+    for (const s of items) (groups[s.source] ??= []).push(s);
+    return Object.entries(groups).map(([src, list]) => `
+      <h2 class="section">${srcHead(src, list)}</h2>
+      <div class="card"><table>
+        <tr><th>${nameHead}</th><th>説明(frontmatter)</th><th style="text-align:right">サイズ</th></tr>
+        ${list.map((s) => `<tr>
+          <td class="mono" style="white-space:nowrap">${esc(s.name)}</td>
+          <td class="muted">${esc(s.description || "—")}</td>
+          <td class="num">${kb(s.bytes)}</td></tr>`).join("")}
+      </table></div>`).join("");
+  }
+
+  const B = S.builtin || {};
+  const stale = B.captured_with && B.current_version && B.captured_with !== B.current_version;
+  const brow = (r, chip) => `<tr>
+    <td class="mono" style="white-space:nowrap">${esc(r.name)}</td>
+    <td>${chip}</td><td class="muted">${esc(r.description || "—")}</td></tr>`;
+  const builtinHtml = `
+    <h2 class="section">Claude Code 内蔵 — ${(B.skills || []).length + (B.agents || []).length} 件 <span class="chip warn">変更不可(バイナリ埋め込み)</span></h2>
+    <div class="note ${stale ? "warn" : "info"}"><span class="tag">${stale ? "要更新" : "手動採取"}</span><span>内蔵スキル・エージェントはバイナリに埋め込まれ、ファイル走査で列挙できません。この一覧は /context 出力からの手動スナップショットです(採取: claude ${esc(B.captured_with || "?")}、${esc(B.captured_at || "?")} / 現在の claude: ${esc(B.current_version || "不明")})。${stale ? "バージョンが変わっています。セッションで /context を実行し、dashboard/builtin-context.json を更新してください。" : ""}</span></div>
+    <div class="card"><table>
+      <tr><th>名前</th><th>種別</th><th>説明</th></tr>
+      ${(B.skills || []).map((r) => brow(r, '<span class="chip blue">内蔵スキル</span>')).join("")}
+      ${(B.agents || []).map((r) => brow(r, '<span class="chip">内蔵エージェント</span>')).join("")}
+    </table></div>
+    <h2 class="section">実行時に組み立てられるもの <span class="chip warn">変更不可(ファイル実体なし)</span></h2>
+    <div class="card"><table>
+      <tr><th>名前</th><th>説明</th></tr>
+      ${(B.runtime || []).map((r) => `<tr>
+        <td class="mono" style="white-space:nowrap">${esc(r.name)}</td>
+        <td class="muted">${esc(r.description || "—")}</td></tr>`).join("")}
+    </table></div>`;
+
+  el.innerHTML = candHtml
+    + '<div class="note info"><span class="tag">範囲</span><span>/context に出る構成要素のうちファイル実体があるもの(スキル・コマンド・エージェント)を出所別に、実体が無いもの(内蔵・実行時組み立て)を最後にまとめています。「編集不可」のものを変えたいときは、プラグインなら配布元リポジトリ、内蔵なら Claude Code 本体の更新でしか変わりません。</span></div>'
+    + grouped(S.skills, "スキル(Skill ツールで発動)")
+    + grouped(S.commands || [], "コマンド(/ で発動)")
+    + grouped(S.agents || [], "エージェント(Agent ツールの subagent_type)")
+    + builtinHtml;
+
+  el.querySelectorAll(".cand-open").forEach((btn) => {
+    btn.onclick = () => {
+      const body = el.querySelector(`.cand-body[data-for="${btn.dataset.i}"]`);
+      if (!body.hidden) { body.hidden = true; btn.textContent = "下書き"; return; }
+      $("code", body).textContent = (S.skill_candidates[Number(btn.dataset.i)] || {}).draft || "(空)";
+      body.hidden = false;
+      btn.textContent = "閉じる";
+    };
+  });
 }
 
 function renderHooks(el) {
@@ -576,10 +660,170 @@ function renderCollect(el) {
   };
 }
 
+function staleServer(el) {
+  // server.py 更新後にプロセスが旧コードのままだと、新しい app.js が要求する
+  // フィールドが /api に無い。空白で落ちる代わりに再起動を案内する
+  if (S.routing && N.device_projects && S.builtin) return false;
+  el.innerHTML = '<div class="note warn"><span class="tag">要再起動</span><span>ダッシュボードのサーバプロセスが更新前のコードのまま動いています。server.py を再起動してからリロードしてください。</span></div>';
+  return true;
+}
+
+function renderRouting(el) {
+  if (staleServer(el)) return;
+  const R = S.routing;
+  const dps = N.device_projects || [];
+  const devices = [...new Set(dps.map((d) => d.device))].sort();
+  // 行 = turnsで観測されたproject_key(注入対象になり得るもの)。generalは全端末固定なので除外
+  const keys = [...new Set(dps.map((d) => d.project_key))]
+    .filter((k) => k !== "general").sort();
+  const dp = (dev, key) => dps.find((d) => d.device === dev && d.project_key === key);
+  const declared = (dev) => (R.parsed[dev] && Array.isArray(R.parsed[dev].projects))
+    ? R.parsed[dev].projects : null;
+
+  el.innerHTML = `
+    <div class="note info"><span class="tag">仕組み</span><span>この表で「どの端末にどのプロジェクトの記憶(index)を配るか」を決めます。チェック=配る。保存すると各端末に配られ、次にセッションを開いたときに反映されます。まだ一度も設定していない端末は、チェックを付けて保存した時からこの表に従います。設定ファイル(routing.json)は git で全端末に配布され、各端末が自分の端末名のエントリだけを読みます(この端末のコピー: <span class="mono">${esc(R.path)}</span>)。</span></div>
+    ${R.error ? `<div class="note warn"><span class="tag">解析失敗</span><span>routing.json: ${esc(R.error)}</span></div>` : ""}
+    <div class="card" style="margin-top:14px">
+      <table>
+        <tr><th>project_key</th>${devices.map((d) =>
+          `<th style="text-align:center"><div class="mono">${esc(d)}</div></th>`
+        ).join("")}</tr>
+        ${keys.map((k) => `<tr><td>${keyLabel(k)}</td>${devices.map((d) => {
+          const o = dp(d, k);
+          if (!o) return '<td style="text-align:center" class="faint">·</td>';
+          const dec = declared(d);
+          const checked = dec !== null && dec.includes(o.cwd);
+          return `<td style="text-align:center">
+            <input type="checkbox" class="cell" data-dev="${esc(d)}" data-path="${esc(o.cwd)}"
+              ${checked ? "checked" : ""} title="${esc(o.cwd)}"></td>`;
+        }).join("")}</tr>`).join("")}
+      </table>
+      <div class="toolrow" style="margin-top:10px">
+        <span class="faint" id="routingNote"></span>
+        <span style="flex:1"></span>
+        <button class="btn mini" id="routingSave">保存して配布(commit &amp; push)</button>
+      </div>
+    </div>
+    <h2 class="section">保存される設定内容のプレビュー(routing.json)</h2>
+    <div class="card"><code class="block" id="routingPreview"></code></div>
+    <div class="note info"><span class="tag">補足</span><span>各セルのパス(マウスを乗せると表示)は、その端末でそのプロジェクトが実際に開かれた場所の実績から出しています。表に出ない場所を配り先にしたいときは routing.json を直接編集してください(この端末〈${esc(R.local_device)}〉の現在の配布先: ${R.local_registry.length ? R.local_registry.map((p) => `<span class="mono">${esc(p)}</span>`).join(", ") : "なし"})。</span></div>`;
+
+  const preview = $("#routingPreview", el);
+  const note = $("#routingNote", el);
+
+  function currentRouting() {
+    // エントリを作るのは「チェックのある端末」か「既に設定済みの端末」。
+    // どちらでもない端末は書かない(=その端末は今まで通り)。
+    // 表に出ないパス(観測外)の既存設定は保持する。
+    // turns 未観測でも routing.json に宣言済みの端末は落とさない
+    const out = {};
+    const allDevices = [...new Set([...devices, ...Object.keys(R.parsed || {})])];
+    allDevices.forEach((dev) => {
+      const checked = [...el.querySelectorAll(`.cell[data-dev="${CSS.escape(dev)}"]:checked`)]
+        .map((c) => c.dataset.path);
+      if (!checked.length && declared(dev) === null) return;
+      const observed = new Set(dps.filter((d) => d.device === dev).map((d) => d.cwd));
+      const kept = (declared(dev) || []).filter((p) => !observed.has(p));
+      out[dev] = { projects: [...new Set([...kept, ...checked])].sort() };
+    });
+    return out;
+  }
+
+  const saveBtn = $("#routingSave", el);
+
+  function canon(r) {
+    // 比較用の正規形: 端末名・パスとも並び順の揺れを吸収する
+    return JSON.stringify(Object.keys(r).sort().map(
+      (d) => [d, [...(r[d].projects || [])].sort()]));
+  }
+
+  function refresh() {
+    const r = currentRouting();
+    preview.textContent = JSON.stringify(r, null, 1);
+    const newly = Object.keys(r).filter((d) => declared(d) === null);
+    note.textContent = newly.length
+      ? `注意: ${newly.join(", ")} は今回からこの画面の設定に従います。チェックしていないプロジェクトは配られなくなります。`
+      : "";
+    const unchanged = canon(r) === canon(R.parsed);
+    saveBtn.disabled = unchanged;
+    saveBtn.textContent = unchanged ? "変更なし" : "保存して配布(commit & push)";
+  }
+  el.querySelectorAll(".cell").forEach((c) => { c.onchange = refresh; });
+  refresh();
+
+  $("#routingSave", el).onclick = async () => {
+    try {
+      const r = await j("/api/routing", { method: "POST",
+        body: JSON.stringify({ routing: currentRouting(),
+          expected: R.raw ?? null }) });
+      toast(r.pushed ? "保存して push しました(各端末は次のセッション開始で適用)" : `保存: ${r.note || "変更なし"}`);
+      S = await j("/api/state");
+      route();
+    } catch (e) { toast(`保存失敗: ${e.message}`, 6000); }
+  };
+}
+
+function renderMessages(el) {
+  if (staleServer(el)) return;
+  const dps = N.device_projects || [];
+  const devices = [...new Set(dps.map((d) => d.device))].sort();
+  const keys = [...new Set(dps.map((d) => d.project_key))].sort();
+  el.innerHTML = `
+    <div class="note info"><span class="tag">仕組み</span><span>宛先に合致する「次のセッション」の開始時に一度だけ表示され、既読になります。恒久的に残したい内容はここではなく「記憶 (facts)」へ。</span></div>
+    <h2 class="section">送信</h2>
+    <div class="card">
+      <div class="toolrow">
+        <select id="msgDev"><option value="">端末: 指定なし</option>
+          ${devices.map((d) => `<option>${esc(d)}</option>`).join("")}</select>
+        <select id="msgProj"><option value="">プロジェクト: 指定なし</option>
+          ${keys.map((k) => `<option>${esc(k)}</option>`).join("")}</select>
+      </div>
+      <div class="toolrow">
+        <input type="text" id="msgBody" placeholder="本文(1〜3文)" style="flex:1">
+        <button class="btn mini" id="msgSend">送信</button>
+      </div>
+    </div>
+    <h2 class="section">履歴(直近30件)</h2>
+    <div class="card" id="msgList">読み込み中…</div>`;
+
+  async function loadList() {
+    const box = $("#msgList", el);
+    try {
+      const rows = await j("/api/messages");
+      box.innerHTML = rows.length ? `<table>
+        <tr><th>id</th><th>日時</th><th>from</th><th>宛先</th><th>本文</th><th>状態</th></tr>
+        ${rows.map((m) => `<tr>
+          <td class="num">${m.id}</td>
+          <td class="mono faint" style="white-space:nowrap">${esc(String(m.created_at || "").slice(5, 16).replace("T", " "))}</td>
+          <td class="mono">${esc(m.from_device)}</td>
+          <td class="mono faint">${esc(m.to_device || "*")} / ${esc(m.to_project || "*")}</td>
+          <td style="white-space:pre-wrap">${esc(m.body)}</td>
+          <td>${m.read_at ? '<span class="chip ok">受信済</span>' : '<span class="chip warn">未読</span>'}</td>
+        </tr>`).join("")}</table>` : '<span class="faint">メッセージはありません。</span>';
+    } catch (e) { box.textContent = `取得失敗: ${e.message}`; }
+  }
+
+  $("#msgSend", el).onclick = async () => {
+    const body = $("#msgBody", el).value.trim();
+    if (!body) return;
+    try {
+      const r = await j("/api/message_send", { method: "POST", body: JSON.stringify({
+        to_device: $("#msgDev", el).value || null,
+        to_project: $("#msgProj", el).value || null, body }) });
+      toast(`送信しました(id=${r.id})`);
+      $("#msgBody", el).value = "";
+      await loadList();
+    } catch (e) { toast(`送信失敗: ${e.message}`, 6000); }
+  };
+  $("#msgBody", el).onkeydown = (e) => { if (e.key === "Enter") $("#msgSend", el).click(); };
+  loadList();
+}
+
 /* ---------------- router ---------------- */
 
 const RENDER = { overview: renderOverview, context: renderContext, facts: renderFacts,
-  skills: renderSkills, hooks: renderHooks, collect: renderCollect };
+  skills: renderSkills, hooks: renderHooks, routing: renderRouting,
+  messages: renderMessages, collect: renderCollect };
 
 function route() {
   const tab = (location.hash || "#overview").slice(1);
@@ -598,7 +842,7 @@ async function boot() {
   $("#content").innerHTML = '<div class="faint">読み込み中…</div>';
   try {
     [S, N] = await Promise.all([j("/api/state"), j("/api/nas")]);
-    if (!N.auto_memory) N = await j("/api/nas?refresh=1");  // 旧キャッシュ対策
+    if (!N.auto_memory || !N.device_projects) N = await j("/api/nas?refresh=1");  // 旧キャッシュ対策
   } catch (e) {
     $("#content").innerHTML = `<div class="note warn"><span class="tag">起動失敗</span><span>${esc(e.message)}</span></div>`;
     return;
