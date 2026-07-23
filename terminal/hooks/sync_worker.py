@@ -46,6 +46,23 @@ def main():
                 f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} hooks_apply error: {exc!r}\n")
         except OSError:
             pass
+    try:
+        # pull した routing.json をプロジェクトindex注入レジストリへ適用する
+        # (senderより先に: 直後のagents_sync同期が新しいレジストリで動くように)
+        proc = subprocess.run([sys.executable,
+                               str(Path(config_dir) / "hooks" / "routing_apply.py"),
+                               config_dir, "--quiet"],
+                              capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            with open(SPOOL / "sync_worker.log", "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} "
+                        f"routing_apply rc={proc.returncode}: {proc.stderr[-300:]}\n")
+    except Exception as exc:
+        try:
+            with open(SPOOL / "sync_worker.log", "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} routing_apply error: {exc!r}\n")
+        except OSError:
+            pass
     subprocess.run([sys.executable, str(Path(config_dir) / "hooks" / "sender.py")],
                    timeout=1800)
 
