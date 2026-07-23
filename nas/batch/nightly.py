@@ -66,6 +66,23 @@ def q(s: str) -> str:
 
 # ---------------------------------------------------------------- claude -p
 
+def _log_usage(label: str, envelope: dict) -> None:
+    """使用量の実測(設計書§14)。ログをgrep "claude-usage" で合算する。
+
+    コストの欠落・形式異常は$0に落とさない(過少計上を検知できる形で残す)。
+    """
+    u = envelope.get("usage") or {}
+    raw = envelope.get("total_cost_usd")
+    try:
+        cost = f"${float(raw):.4f}"
+    except (TypeError, ValueError):
+        cost = f"unknown({raw!r})"
+    log(f"  claude-usage {label}: in={u.get('input_tokens', 0)}"
+        f" cache_w={u.get('cache_creation_input_tokens', 0)}"
+        f" cache_r={u.get('cache_read_input_tokens', 0)}"
+        f" out={u.get('output_tokens', 0)} cost={cost}")
+
+
 def ask_claude(prompt: str, label: str) -> str:
     """全ツール無効のヘッドレスclaude。応答テキストを返す。"""
     r = subprocess.run(
@@ -76,20 +93,16 @@ def ask_claude(prompt: str, label: str) -> str:
         env={**os.environ, "CLAUDE_SPOOL_SKIP": "1"},  # バッチ自身のセッションは収集しない
     )
     if r.returncode != 0:
+        # 失敗応答にも消費分のusage/costが入る(SDKは失敗時点までを計上する)
+        try:
+            _log_usage(label, json.loads(r.stdout))
+        except Exception:
+            pass
         raise RuntimeError(f"claude failed ({label}): {r.stderr.strip()[:500]}")
     envelope = json.loads(r.stdout)
+    _log_usage(label, envelope)
     if envelope.get("subtype") != "success":
         raise RuntimeError(f"claude non-success ({label}): {str(envelope)[:300]}")
-    # 使用量の実測(設計書§14)。ログをgrep "claude-usage" で合算する
-    u = envelope.get("usage") or {}
-    try:
-        cost = float(envelope.get("total_cost_usd") or 0)
-    except (TypeError, ValueError):
-        cost = 0.0
-    log(f"  claude-usage {label}: in={u.get('input_tokens', 0)}"
-        f" cache_w={u.get('cache_creation_input_tokens', 0)}"
-        f" cache_r={u.get('cache_read_input_tokens', 0)}"
-        f" out={u.get('output_tokens', 0)} cost=${cost:.4f}")
     return envelope.get("result", "")
 
 
