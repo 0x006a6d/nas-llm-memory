@@ -80,6 +80,16 @@ def ask_claude(prompt: str, label: str) -> str:
     envelope = json.loads(r.stdout)
     if envelope.get("subtype") != "success":
         raise RuntimeError(f"claude non-success ({label}): {str(envelope)[:300]}")
+    # 使用量の実測(設計書§14)。ログをgrep "claude-usage" で合算する
+    u = envelope.get("usage") or {}
+    try:
+        cost = float(envelope.get("total_cost_usd") or 0)
+    except (TypeError, ValueError):
+        cost = 0.0
+    log(f"  claude-usage {label}: in={u.get('input_tokens', 0)}"
+        f" cache_w={u.get('cache_creation_input_tokens', 0)}"
+        f" cache_r={u.get('cache_read_input_tokens', 0)}"
+        f" out={u.get('output_tokens', 0)} cost=${cost:.4f}")
     return envelope.get("result", "")
 
 

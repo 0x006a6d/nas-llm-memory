@@ -7,7 +7,7 @@ usage: compact.py [--key KEY] [--pairs N] [--yes]
 current_facts をPGroonga self-joinで類似ペア列挙し、スコア上位N組だけを
 §3同型のプロンプトで merge/keep 判定する(閾値は設けず件数予算で絞る)。
 
-merge時の系譜(スキーマ007):
+merge時の系譜(スキーマ011_retired):
 - 統合fact M を挿入し、ペアの新しい側を replaces=<新しい側id> で置き換える
 - 古い側には retired_by=M を刻む(削除しない。系譜は双方向に追える)
 - status は両方verifiedのときのみverified、provenanceは和集合、confidenceは小さい方
