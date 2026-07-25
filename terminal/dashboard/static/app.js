@@ -55,8 +55,71 @@ function budgetSegments() {
   ];
 }
 
+/* batch_runs の notes からジョブ種別を判定する。
+   running/success/failed のどの段階でも notes 先頭に種別が残る前提
+   (nightly は running='P2'・success='inserted=…'・failed='P2 FAILED: …')。
+   旧形式の失敗row(エラー文のみ)は nightly に落ちる。 */
+function batchKind(notes) {
+  const s = String(notes || "");
+  if (s.startsWith("backfill-distill")) return "backfill";
+  if (s.startsWith("skill-scout-init") || s.startsWith("watermark-init")) return "init";
+  if (s.startsWith("skill-scout")) return "skill-scout";
+  if (s.startsWith("edges")) return "edges";
+  if (s.startsWith("compact")) return "compact";
+  return "nightly";
+}
+
+/* 夜間バッチの健全性チェック。失敗した・止まっている・そもそも記録が無い、を注意欄に出す。
+   ロック敗退や cron 起動失敗は batch_runs に row を残さないため、
+   「最新が failed」だけでなく「記録なし」「成功が古い」も欠測のシグナルとして扱う。 */
+function batchWarnings() {
+  const runs = (N.batch_runs || []).filter((b) => batchKind(b.notes) !== "init");
+  const out = [];
+  const now = Date.now();
+  const jobs = [
+    { kind: "nightly", label: "nightly(蒸留)", staleH: 30 },
+    // backfill は移行期間のみのジョブ。crontab から外した後の欠測は正常なので staleness は見ない
+    { kind: "backfill", label: "backfill", staleH: null },
+    { kind: "edges", label: "edges(補足関係)", staleH: 30 },
+    { kind: "skill-scout", label: "skill-scout(スキル候補)", staleH: 30 },
+    { kind: "compact", label: "compact(週次統合)", staleH: 8 * 24 },
+  ];
+  for (const j of jobs) {
+    const rows = runs.filter((b) => batchKind(b.notes) === j.kind);
+    if (!rows.length) {
+      // backfill(staleH=null)は移行期間のみのジョブ:
+      // crontabから外れて記録が窓から消えた後の「記録なし」は正常なので警告しない
+      if (j.staleH != null) out.push({ kind: "warn", tag: "バッチ未記録",
+        text: `${j.label}: batch_runs に実行記録がありません。cron から起動できていない可能性があります(NAS の /volume2/claude-system/batch/*.log を確認)。` });
+      continue;
+    }
+    const last = rows[0];
+    const lastNotes = String(last.notes || "");
+    if (last.status === "failed" && !lastNotes.includes("dry-run")) {
+      out.push({ kind: "warn", tag: "バッチ失敗",
+        text: `${j.label}: 最新 run ${last.id} が失敗 — ${lastNotes.slice(0, 160) || "(メモなし)"}` });
+    } else if (last.status === "running" &&
+               now - Date.parse(last.started_at) > 12 * 3600 * 1000) {
+      out.push({ kind: "warn", tag: "バッチ滞留",
+        text: `${j.label}: run ${last.id} が12時間以上 running のままです(途中死の可能性。ログを確認して手動再実行)。` });
+    }
+    if (j.staleH != null) {
+      const okRow = rows.find((b) => b.status === "success");
+      if (!okRow) {
+        out.push({ kind: "warn", tag: "成功実績なし",
+          text: `${j.label}: 直近${runs.length}件の記録に成功がありません。` });
+      } else if (now - Date.parse(okRow.finished_at) > j.staleH * 3600 * 1000) {
+        out.push({ kind: "warn", tag: "バッチ停止?",
+          text: `${j.label}: 最終成功は run ${okRow.id}(${String(okRow.finished_at).slice(0, 16).replace("T", " ")}Z)。それ以降成功していません。` });
+      }
+    }
+  }
+  return out;
+}
+
 function warnings() {
   const out = [];
+  out.push(...batchWarnings());
   const dup = S.hooks.filter((h) => h.duplicate);
   for (const d of dup) {
     out.push({ kind: "warn", tag: "重複",
@@ -116,7 +179,7 @@ function renderOverview(el) {
       </a><span class="parrow">→</span>
       <a class="pstage" href="#facts">
         <div class="pt">蒸留</div>
-        <div class="pd">夜間バッチ(03:30)が会話から恒久的な事実(facts)を抽出し、繰り返し作業をスキル候補として発掘</div>
+        <div class="pd">夜間バッチ(03:00)が会話から恒久的な事実(facts)を抽出し、繰り返し作業をスキル候補として発掘</div>
         <div class="pn">${num(factsTotal)} facts · 候補 ${cands}</div>
       </a><span class="parrow">→</span>
       <a class="pstage" href="#context">
@@ -157,9 +220,9 @@ function renderOverview(el) {
       <div class="ss"><div class="n">${S.skills.length}</div><div class="l">スキル</div></div>
       <div class="ss"><div class="n">${S.hooks.length}</div><div class="l">hook 登録</div></div>
       <div class="ss">
-        <div class="n ok">${lastBatch ? esc(lastBatch.status) : "—"}</div>
-        <div class="l">直近バッチ (run ${lastBatch ? lastBatch.id : "—"})</div>
-        <div class="s">${lastBatch ? esc(String(lastBatch.finished_at || "").slice(5, 16).replace("T", " ")) : ""}</div>
+        <div class="n ${!lastBatch || lastBatch.status === "running" ? "" : lastBatch.status === "success" ? "ok" : "warn"}">${lastBatch ? esc(lastBatch.status) : "—"}</div>
+        <div class="l">直近バッチ (run ${lastBatch ? lastBatch.id : "—"} ${lastBatch ? esc(batchKind(lastBatch.notes)) : ""})</div>
+        <div class="s">${lastBatch ? esc(String(lastBatch.finished_at || lastBatch.started_at || "").slice(5, 16).replace("T", " ")) : ""}</div>
       </div>
     </div>
 
@@ -251,7 +314,7 @@ function renderContext(el) {
     })),
   ];
   el.innerHTML = `
-    <div class="note warn"><span class="tag">前提</span><span>index.md は夜間バッチ(03:30)が current_facts から全再生成します。ここでの直接編集は即座に反映されますが翌バッチで上書きされます。恒久的に直したい内容は「記憶 (facts)」タブで facts を修正してください。</span></div>
+    <div class="note warn"><span class="tag">前提</span><span>index.md は夜間バッチ(03:00)が current_facts から全再生成します。ここでの直接編集は即座に反映されますが翌バッチで上書きされます。恒久的に直したい内容は「記憶 (facts)」タブで facts を修正してください。</span></div>
     <div class="note info"><span class="tag">凡例</span><span>一覧は claude-config/memory/ 配下の全端末・全プロジェクト分。セッションに注入されるのは general(全端末・毎セッション)と、routing.json で宣言された端末×プロジェクトの index(そのプロジェクトで開いたセッションのみ)。<span class="chip amber">auto</span> = 夜間バッチが再生成するファイル。<span class="devtag">端末名</span> = そのプロジェクトを主に使っている端末(会話履歴 turns からの推定)。</span></div>
     <div class="split" style="margin-top:14px">
       <div class="card filelist" id="ctxList"></div>
@@ -325,7 +388,7 @@ function renderFacts(el) {
 
   el.innerHTML = `
     <div class="note info"><span class="tag">用語</span><span><b>turns</b> = 全端末・全エージェント(claude/codex)の生の発話ログ(1発話=1行、NAS に蓄積)。<b>facts</b> = そこから蒸留された恒久的な事実。この画面に出るのは current_facts(撤去済みを除いた、生きている facts だけ)です。</span></div>
-    <div class="note info"><span class="tag">正道</span><span>ここが恒久的なコンテキスト調整の場所です。facts への追加・修正・撤去は、次回の夜間バッチ(03:30)で各 index.md に反映されます。</span></div>
+    <div class="note info"><span class="tag">正道</span><span>ここが恒久的なコンテキスト調整の場所です。facts への追加・修正・撤去は、次回の夜間バッチ(03:00)で各 index.md に反映されます。</span></div>
     <div class="toolrow" id="factProjects" style="margin-top:14px"></div>
     <div class="card" style="margin-bottom:14px">
       <div class="toolrow" style="margin-bottom:0">
@@ -800,16 +863,19 @@ function renderCollect(el) {
     <h2 class="section">NAS 夜間バッチ(crontab)</h2>
     <div class="card"><code class="block">${esc(S.crontab)}</code></div>
 
-    <h2 class="section">バッチ実行履歴(直近10件)</h2>
+    <h2 class="section">バッチ実行履歴(直近${N.batch_runs.length}件)</h2>
+    <div class="note info"><span class="tag">読み方</span><span>時刻は UTC(KST−9時間)。ロック敗退や cron 起動失敗はここに row を残さず「時間が来ても行が増えない」形で現れます — その検知は概要タブの注意欄(未記録・成功が古い・滞留)が担当します。</span></div>
     <div class="card"><table>
-      <tr><th>run</th><th>開始</th><th>終了</th><th>状態</th><th style="text-align:right">turns処理</th><th style="text-align:right">index行</th></tr>
+      <tr><th>run</th><th>種別</th><th>開始</th><th>終了</th><th>状態</th><th style="text-align:right">turns処理</th><th style="text-align:right">index行</th><th>メモ</th></tr>
       ${N.batch_runs.map((b) => `<tr>
         <td class="num">${b.id}</td>
+        <td class="mono">${esc(batchKind(b.notes))}</td>
         <td class="mono faint">${esc(String(b.started_at || "").slice(5, 16).replace("T", " "))}</td>
         <td class="mono faint">${esc(String(b.finished_at || "").slice(5, 16).replace("T", " "))}</td>
-        <td><span class="chip ${b.status === "success" ? "ok" : "err"}">${esc(b.status)}</span></td>
+        <td><span class="chip ${b.status === "success" ? "ok" : b.status === "running" ? "" : "err"}">${esc(b.status)}</span></td>
         <td class="num">${b.turns_processed ?? "·"}</td>
-        <td class="num">${b.index_lines ?? "·"}</td></tr>`).join("")}
+        <td class="num">${b.index_lines ?? "·"}</td>
+        <td class="faint" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(b.notes || "")}">${esc(String(b.notes || ""))}</td></tr>`).join("")}
     </table></div>
 
     <h2 class="section">端末側 hook スクリプト(claude-config/hooks)</h2>

@@ -717,9 +717,11 @@ def nas_snapshot():
         "facts_by_project": sql_json(
             "select project_key, count(*) n from current_facts "
             "group by project_key order by n desc"),
+        # 60件 ≈ 12日分(1晩 nightly+チェーン3本+α)。週次compactの健全性判定が
+        # 窓から落ちない件数にしておく(10件だと2日で失敗が見えなくなる)
         "batch_runs": sql_json(
             "select id, started_at, finished_at, status, turns_processed, "
-            "index_lines, notes from batch_runs order by id desc limit 10"),
+            "index_lines, notes from batch_runs order by id desc limit 60"),
         "auto_memory": sql_json(
             "select id, device, project_key, file_path, file_mtime, "
             "length(content) bytes from auto_memory_snapshots "

@@ -175,6 +175,7 @@ h2.section:first-child { margin-top: 0; }
 .stat-strip .ss:last-child{border-right:none}
 .stat-strip .ss .n{font:700 27px/1 system-ui,sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .stat-strip .ss .n.ok{font-size:14px;font-weight:600;color:var(--ok)}
+.stat-strip .ss .n.warn{font-size:14px;font-weight:600;color:var(--warn)}
 .stat-strip .ss .l{font-size:12px;color:var(--muted);margin-top:7px}
 .stat-strip .ss .s{font:11px var(--mono);color:var(--faint);margin-top:4px}
 .dot{flex:none}
