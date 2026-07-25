@@ -878,6 +878,23 @@ function renderCollect(el) {
         <td class="faint" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(b.notes || "")}">${esc(String(b.notes || ""))}</td></tr>`).join("")}
     </table></div>
 
+    <h2 class="section">この端末の実接続設定(~/.claude-spool — git 外の秘密層)</h2>
+    ${(() => {
+      const sp = S.spool || {};
+      if (!sp.present) return `<div class="note warn"><span class="tag">未整備</span><span>${esc(sp.config_path || "~/.claude-spool/config.json")} がありません。setup.sh を実行してください。</span></div>`;
+      if (sp.error) return `<div class="note warn"><span class="tag">読込失敗</span><span>${esc(sp.error)}</span></div>`;
+      return `<div class="note info"><span class="tag">凡例</span><span>実物は git 外(setup.sh が対話生成)。トークンと証明書は生値でなく fp(sha256 先頭12桁)で表示 — fp の一致で確認できるのはトークン・証明書の同一性だけなので、ingest_url は表の値で照合してください。</span></div>
+      <div class="card"><table>
+        <tr><td>config.json</td><td class="mono faint">${esc(sp.config_path)}</td></tr>
+        <tr><td>ingest_url</td><td class="mono">${esc(sp.ingest_url)}</td></tr>
+        <tr><td>api_token</td><td>${sp.token_set ? `<span class="chip ok">設定済み</span> <span class="mono faint">fp ${esc(sp.token_fp)}</span>` : '<span class="chip err">未設定</span>'}</td></tr>
+        <tr><td>TLS 証明書</td><td><span class="mono faint">${esc(sp.tls_cert || "(未設定)")}</span> ${sp.tls_cert_present ? `<span class="chip ok">あり</span> <span class="mono faint">fp ${esc(sp.tls_cert_fp || "?")}</span>` : '<span class="chip err">なし</span>'}</td></tr>
+        <tr><td>送信キュー</td><td>pending ${sp.pending ?? "·"} 件 / sent ${sp.sent ?? "·"} 件 <span class="faint">(pending が溜まり続けるのは送信失敗のシグナル)</span></td></tr>
+        <tr><td>最終送信</td><td class="mono">${esc(sp.last_sent_at || "—")} <span class="faint">sender は毎時17分</span></td></tr>
+        <tr><td>memory スキャン</td><td class="mono">${esc(sp.last_memory_scan_at || "—")}</td></tr>
+      </table></div>`;
+    })()}
+
     <h2 class="section">端末側 hook スクリプト(claude-config/hooks)</h2>
     <div class="card">${S.hook_scripts.map((h) => `<span class="chip mono">${esc(h)}</span>`).join(" ")}</div>
 

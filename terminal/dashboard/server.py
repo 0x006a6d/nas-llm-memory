@@ -12,6 +12,7 @@
              無いため、置換先の無い削除はこの自己参照 tombstone で表す。
   - index.md / sync-exclude.txt のファイル編集は保存前に同名 .bak へ退避。
 """
+import hashlib
 import json
 import os
 import re
@@ -633,6 +634,85 @@ def _spool_config():
     return cfg, url
 
 
+def spool_state():
+    """~/.claude-spool の実接続設定と送信キューの状態(収集タブ表示用)。
+
+    api_token は生値を返さない。端末間の設定照合ができるよう sha256 指紋の先頭だけ返す
+    (TLS 証明書も同様。全端末で同じ指紋になっていれば同じ設定を向いている)。
+    """
+    spool = HOME / ".claude-spool"
+    cfg_path = spool / "config.json"
+    if DEMO:
+        return {"config_path": "~/.claude-spool/config.json", "present": False}
+    out = {"config_path": str(cfg_path), "present": cfg_path.is_file()}
+    if not out["present"]:
+        return out
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"config.json を読めません: {exc}"
+        return out
+    token = str(cfg.get("api_token") or "")
+    cert_str = str(cfg.get("tls_cert") or "")
+    cert = Path(cert_str) if cert_str else None
+
+    # 表示するURLはscheme://host[:port]/pathに再構成する(userinfo・query・fragmentは
+    # 表示に不要なので、仮に書かれていても落とす)
+    u = urllib.parse.urlsplit(str(cfg.get("ingest_url") or ""))
+    host = u.hostname or ""
+    if u.port:
+        host += f":{u.port}"
+    ingest_url = f"{u.scheme}://{host}{u.path}" if u.scheme and host else ""
+
+    def _count(d):
+        # senderが毎時走ってpending→sentへ動かすため、列挙中にエントリが消えうる
+        try:
+            return sum(1 for _ in d.iterdir()) if d.is_dir() else None
+        except OSError:
+            return None
+
+    def _mtime_of(p):
+        try:
+            return datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d %H:%M")
+        except OSError:
+            return None
+
+    def _newest_mtime(d):
+        newest = None
+        try:
+            for p in d.glob("*"):
+                try:
+                    t = p.stat().st_mtime
+                except OSError:
+                    continue
+                newest = t if newest is None else max(newest, t)
+        except OSError:
+            return None
+        return datetime.fromtimestamp(newest).strftime("%m-%d %H:%M") if newest else None
+
+    cert_fp = None
+    if cert is not None and cert.is_file():
+        try:
+            cert_fp = hashlib.sha256(cert.read_bytes()).hexdigest()[:12]
+        except OSError:
+            pass
+    out.update({
+        "ingest_url": ingest_url,
+        "token_set": bool(token),
+        # 照合用の指紋。トークンはsetup生成の高エントロピー値で、先頭48bitから生値は
+        # 復元できない(127.0.0.1限定ページ)。生値そのものは絶対に返さない
+        "token_fp": hashlib.sha256(token.encode()).hexdigest()[:12] if token else None,
+        "tls_cert": cert_str or None,
+        "tls_cert_present": bool(cert is not None and cert.is_file()),
+        "tls_cert_fp": cert_fp,
+        "pending": _count(spool / "pending"),
+        "sent": _count(spool / "sent"),
+        "last_sent_at": _newest_mtime(spool / "sent"),
+        "last_memory_scan_at": _mtime_of(spool / "last_memory_scan"),
+    })
+    return out
+
+
 def send_message(to_device, to_project, body):
     """ingest APIのPOST /message経由で送信する(マスク・検証はサーバ側)。"""
     if DEMO:
@@ -694,6 +774,7 @@ def state():
         "agents": collect_agents(),
         "builtin": builtin_snapshot(),
         "crontab": read_text(CONFIG_DIR / "batch" / "crontab.txt") or "",
+        "spool": spool_state(),
         "hook_scripts": sorted(p.name for p in (CONFIG_DIR / "hooks").glob("*.py")),
         "git": git_info(),
         "routing": routing_state(),
