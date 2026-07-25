@@ -11,15 +11,16 @@ let S = null;   // /api/state
 let N = null;   // /api/nas
 let factsCache = {};   // project -> rows
 
+// パイプライン順: 収集 → 記録 → 蒸留(スキル/Hooks) → 配布(コンテキスト/routing) → 申し送り
 const TABS = {
   overview: "概要",
-  context: "コンテキスト",
-  facts: "記憶 (facts)",
+  collect: "収集",
+  facts: "記録 (facts)",
   skills: "スキル",
   hooks: "Hooks",
+  context: "コンテキスト",
   routing: "配布",
   messages: "申し送り",
-  collect: "収集設定",
 };
 
 async function j(url, opts) {
@@ -101,7 +102,36 @@ function renderOverview(el) {
   const grad = `conic-gradient(${stops.join(",")},rgba(255,255,255,.06) ${usedEnd}% 100%)`;
   const usedPct = Math.round(total / MAX * 100);
 
+  const cands = (S.skill_candidates || []).length;
+  const routedN = Object.values((S.routing && S.routing.parsed) || {})
+    .reduce((a, e) => a + ((e && e.projects) || []).length, 0);
+
   el.innerHTML = `
+    <div class="numhd"><span class="no">00</span><span class="lb">全体の流れ — このシステムがやっていること</span></div>
+    <div class="pipeline">
+      <a class="pstage" href="#collect">
+        <div class="pt">収集</div>
+        <div class="pd">全端末の claude/codex セッションを hook が spool に書き、NAS の turns(生ログ)へ送る</div>
+        <div class="pn">${num(turnsTotal)} turns</div>
+      </a><span class="parrow">→</span>
+      <a class="pstage" href="#facts">
+        <div class="pt">蒸留</div>
+        <div class="pd">夜間バッチ(03:30)が会話から恒久的な事実(facts)を抽出し、繰り返し作業をスキル候補として発掘</div>
+        <div class="pn">${num(factsTotal)} facts · 候補 ${cands}</div>
+      </a><span class="parrow">→</span>
+      <a class="pstage" href="#context">
+        <div class="pt">index 生成</div>
+        <div class="pd">facts からプロジェクト別 index.md を全再生成(配布物。手動編集は翌バッチで上書き)</div>
+        <div class="pn">${S.memory_indexes.length} index</div>
+      </a><span class="parrow">→</span>
+      <a class="pstage" href="#routing">
+        <div class="pt">配布・注入</div>
+        <div class="pd">routing 宣言に従い端末×プロジェクトのセッション冒頭へ注入。general は全端末・毎セッション</div>
+        <div class="pn">${routedN} 宣言</div>
+      </a>
+    </div>
+    <div class="note info"><span class="tag">直し方</span><span>恒久的に直す → 「記録 (facts)」タブで facts を修正。繰り返し作業を固定化 → スキル/Hooks タブ。後で見返す会話 → 記録タブでフラグ。index の直接編集は翌バッチで上書きされる一時措置です。</span></div>
+
     <div class="numhd"><span class="no">01</span><span class="lb">毎セッション注入されるコンテキスト</span></div>
     <div class="budget-total">
       <span class="kb">${(total / 1024).toFixed(1)}<small>KB</small></span>
@@ -140,11 +170,11 @@ function renderOverview(el) {
     <div class="numhd"><span class="no">04</span><span class="lb">プロジェクト別の蓄積</span></div>
     <div class="card">
       <table>
-        <tr><th>project_key</th><th style="text-align:right">turns</th><th style="text-align:right">facts</th><th>最終収集</th></tr>
+        <tr><th>project_key<span class="faint" style="font-weight:400">(タグ=主に使う端末。クリックで配布タブへ)</span></th><th style="text-align:right">turns</th><th style="text-align:right">facts</th><th>最終収集</th></tr>
         ${N.turns_by_project.map((r) => {
           const f = N.facts_by_project.find((x) => x.project_key === r.project_key ||
             x.project_key === keyToIndexDir(r.project_key));
-          return `<tr><td class="mono">${keyLabel(r.project_key)}</td>
+          return `<tr><td class="mono"><a class="plink" href="#routing" title="配布タブで、このプロジェクトの index がどの端末に注入されるかを確認・変更">${keyLabel(r.project_key)}</a></td>
             <td class="num">${num(r.n)}</td>
             <td class="num">${f ? num(f.n) : "·"}</td>
             <td class="faint mono">${esc(String(r.last_ts || "").slice(0, 16).replace("T", " "))}</td></tr>`;
@@ -170,7 +200,44 @@ function deviceOf(key) {
 
 function keyLabel(key) {
   const dev = deviceOf(key);
-  return `${esc(key)}${dev ? ` <span class="devtag">${esc(dev)}</span>` : ""}`;
+  return `${esc(key)}${dev ? ` <span class="devtag" title="このプロジェクトを主に使っている端末(会話履歴 turns からの推定)">${esc(dev)}</span>` : ""}`;
+}
+
+/* textarea / contenteditable に行番号ガターを付ける。折返しがあっても論理行の先頭位置に
+   番号が揃うよう、同一スタイルの不可視ミラーで各行の描画高さを実測する。 */
+function attachLineNumbers(ta, gutter) {
+  const getText = () => (ta.tagName === "TEXTAREA" ? ta.value : ta.textContent);
+  const mirror = document.createElement("div");
+  mirror.className = "ln-mirror";
+  ta.parentElement.appendChild(mirror);
+  function update() {
+    const cs = getComputedStyle(ta);
+    for (const p of ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing",
+                     "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+                     "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+                     "boxSizing", "whiteSpace", "wordBreak", "overflowWrap", "tabSize"]) {
+      mirror.style[p] = cs[p];
+    }
+    mirror.style.width = `${ta.clientWidth}px`;
+    const lines = getText().split("\n");
+    mirror.replaceChildren(...lines.map((l) => {
+      const d = document.createElement("div");
+      d.textContent = l || " ";
+      return d;
+    }));
+    const html = [...mirror.children].map((c, i) =>
+      `<div class="ln" style="top:${c.offsetTop}px">${i + 1}</div>`).join("");
+    gutter.innerHTML = `<div class="ln-inner">${html}</div>`;
+    sync();
+  }
+  function sync() {
+    const inner = gutter.firstElementChild;
+    if (inner) inner.style.transform = `translateY(${-ta.scrollTop}px)`;
+  }
+  ta.addEventListener("input", update);
+  ta.addEventListener("scroll", sync, { passive: true });
+  new ResizeObserver(update).observe(ta);
+  update();
 }
 
 function renderContext(el) {
@@ -185,6 +252,7 @@ function renderContext(el) {
   ];
   el.innerHTML = `
     <div class="note warn"><span class="tag">前提</span><span>index.md は夜間バッチ(03:30)が current_facts から全再生成します。ここでの直接編集は即座に反映されますが翌バッチで上書きされます。恒久的に直したい内容は「記憶 (facts)」タブで facts を修正してください。</span></div>
+    <div class="note info"><span class="tag">凡例</span><span>一覧は claude-config/memory/ 配下の全端末・全プロジェクト分。セッションに注入されるのは general(全端末・毎セッション)と、routing.json で宣言された端末×プロジェクトの index(そのプロジェクトで開いたセッションのみ)。<span class="chip amber">auto</span> = 夜間バッチが再生成するファイル。<span class="devtag">端末名</span> = そのプロジェクトを主に使っている端末(会話履歴 turns からの推定)。</span></div>
     <div class="split" style="margin-top:14px">
       <div class="card filelist" id="ctxList"></div>
       <div class="card" id="ctxEditor"></div>
@@ -216,9 +284,13 @@ function renderContext(el) {
       </div>
       <div class="gauge" id="ctxGauge"></div>
       <div class="gauge-labels"><span>0</span><span>32KiB (Codex既定の打ち切り)</span><span>64KiB (この端末の上限)</span></div>
-      <textarea class="editor" id="ctxText" ${readonly ? "readonly" : ""} spellcheck="false"></textarea>`;
+      <div class="editor-wrap">
+        <div class="editor-gutter" id="ctxGutter" aria-hidden="true"></div>
+        <textarea class="editor" id="ctxText" ${readonly ? "readonly" : ""} spellcheck="false"></textarea>
+      </div>`;
     const ta = $("#ctxText", editor);
     ta.value = sel.content;
+    attachLineNumbers(ta, $("#ctxGutter", editor));
     const gauge = $("#ctxGauge", editor);
     function drawGauge() {
       const bytes = new TextEncoder().encode(ta.value).length;
@@ -252,24 +324,29 @@ function renderFacts(el) {
   let sel = projects[0] || "general";
 
   el.innerHTML = `
+    <div class="note info"><span class="tag">用語</span><span><b>turns</b> = 全端末・全エージェント(claude/codex)の生の発話ログ(1発話=1行、NAS に蓄積)。<b>facts</b> = そこから蒸留された恒久的な事実。この画面に出るのは current_facts(撤去済みを除いた、生きている facts だけ)です。</span></div>
     <div class="note info"><span class="tag">正道</span><span>ここが恒久的なコンテキスト調整の場所です。facts への追加・修正・撤去は、次回の夜間バッチ(03:30)で各 index.md に反映されます。</span></div>
     <div class="toolrow" id="factProjects" style="margin-top:14px"></div>
     <div class="card" style="margin-bottom:14px">
       <div class="toolrow" style="margin-bottom:0">
-        <input type="text" id="factNew" placeholder="新しい事実を1行で(選択中のプロジェクトに追加)">
+        <span class="lnfield"><span class="ln1" aria-hidden="true">1</span><input type="text" id="factNew" placeholder="新しい事実を1行で(選択中のプロジェクトに追加)"></span>
         <button class="btn mini" id="factAdd">追加</button>
       </div>
     </div>
     <div class="card" id="factList" style="max-height:62vh;overflow-y:auto">読み込み中…</div>
-    <h2 class="section">turns 全文検索(PGroonga)</h2>
+    <h2 class="section">重要フラグ付きの会話</h2>
+    <div class="note info"><span class="tag">用途</span><span>後で見返したい・skill/hook 化の種になりそうな会話に印を付けて固定表示します。付与・解除は下の全文検索結果の ☆/★ から。フラグは NAS に保存され全端末で共通です(turns 本体は変更しません)。</span></div>
+    <div class="card" id="flagList">読み込み中…</div>
+    <h2 class="section">turns 全文検索(PGroonga = NAS 上の全文検索。全端末・全エージェントの発話ログが対象)</h2>
     <div class="card">
       <div class="toolrow">
-        <input type="text" id="turnQ" placeholder="発話ログを検索…">
+        <span class="lnfield"><span class="ln1" aria-hidden="true">1</span><input type="text" id="turnQ" placeholder="発話ログを検索…"></span>
         <select id="turnProj"><option value="">全プロジェクト</option>
           ${N.turns_by_project.map((r) => {
             const dev = deviceOf(r.project_key);
             return `<option value="${esc(r.project_key)}">${esc(r.project_key)}${dev ? `〈${esc(dev)}〉` : ""}</option>`;
           }).join("")}</select>
+        <label class="faint" style="white-space:nowrap"><input type="checkbox" id="turnFlagged"> フラグ付き会話のみ</label>
         <button class="btn mini ghost" id="turnGo">検索</button>
       </div>
       <div id="turnResults" class="faint">キーワードを入れて検索してください。</div>
@@ -309,13 +386,16 @@ function renderFacts(el) {
       <div class="fact-row" data-id="${f.id}">
         <div class="fact-meta">
           <span class="fact-id">#${f.id}</span>
-          <span class="chip ${f.status === "verified" ? "ok" : "warn"}">${esc(f.status)}</span>
+          <span class="chip ${f.status === "verified" ? "ok" : "warn"}" title="fact の検証状態。verified = 事実として確定。それ以外はバッチが自動抽出した未確定情報">${esc(f.status)}</span>
           <span class="fact-id">${esc(String(f.created_at || "").slice(0, 10))}<br>${esc(f.created_by || "")}</span>
         </div>
-        <div class="fact-body">${esc(f.content)}</div>
+        <div class="editor-gutter fact-gutter" aria-hidden="true"></div>
+        <div class="fact-body" contenteditable="plaintext-only" spellcheck="false"
+             title="クリックしてそのまま編集できます。変えると保存/取消が出ます(保存 = 旧 fact を置き換える新 fact を作成。系譜は replaces 列に残る)">${esc(f.content)}</div>
         <div class="fact-actions">
-          <button class="btn mini ghost act-edit">修正</button>
-          <button class="btn mini danger act-retire">撤去</button>
+          <button class="btn mini ok-save" hidden title="Cmd+Enter でも保存">保存(置換)</button>
+          <button class="btn mini ghost ok-cancel" hidden title="Esc でも取消">取消</button>
+          <button class="btn mini danger act-retire" title="この fact を撤去する(行は消えるが履歴としては残る)">撤去</button>
         </div>
       </div>`).join("");
 
@@ -323,25 +403,29 @@ function renderFacts(el) {
       const id = Number(row.dataset.id);
       const fact = rows.find((r) => Number(r.id) === id);
       const body = $(".fact-body", row);
+      const save = $(".ok-save", row);
+      const cancel = $(".ok-cancel", row);
+      attachLineNumbers(body, $(".fact-gutter", row));
 
-      $(".act-edit", row).onclick = () => {
-        if (row.classList.contains("editing")) return;
-        row.classList.add("editing");
-        body.innerHTML = `<div class="fact-edit">
-          <textarea spellcheck="false"></textarea>
-          <button class="btn mini ok-save">保存(置換 fact を作成)</button>
-          <button class="btn mini ghost ok-cancel">取消</button></div>`;
-        const ta = $("textarea", body);
-        ta.value = fact.content;
-        $(".ok-cancel", body).onclick = () => { row.classList.remove("editing"); body.textContent = fact.content; };
-        $(".ok-save", body).onclick = async () => {
-          try {
-            await j("/api/fact", { method: "POST", body: JSON.stringify(
-              { op: "replace", id, content: ta.value, project: sel }) });
-            toast(`#${id} を置換しました(次回バッチで index に反映)`);
-            await loadFacts(true);
-          } catch (e) { toast(`失敗: ${e.message}`, 5000); }
-        };
+      // 修正ボタン無しの直接編集: 内容が変わったときだけ保存/取消を出す
+      // (保存時と同じ trim 済みで比較し、空白だけの変化は変更扱いにしない)
+      const dirty = () => body.textContent.trim() !== fact.content.trim();
+      const refresh = () => { save.hidden = cancel.hidden = !dirty(); row.classList.toggle("editing", dirty()); };
+      body.oninput = refresh;
+      body.onkeydown = (e) => {
+        if (e.key === "Escape") { cancel.click(); body.blur(); }
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); save.click(); }
+      };
+      cancel.onclick = () => { body.textContent = fact.content; refresh(); };
+      save.onclick = async () => {
+        const content = body.textContent.trim();
+        if (!content || !dirty()) return;
+        try {
+          await j("/api/fact", { method: "POST", body: JSON.stringify(
+            { op: "replace", id, content, project: sel }) });
+          toast(`#${id} を置換しました(次回バッチで index に反映)`);
+          await loadFacts(true);
+        } catch (e) { toast(`失敗: ${e.message}`, 5000); }
       };
 
       const retire = $(".act-retire", row);
@@ -380,20 +464,73 @@ function renderFacts(el) {
     res.textContent = "検索中…";
     try {
       const proj = $("#turnProj", el).value;
-      const rows = await j(`/api/turns?q=${encodeURIComponent(q)}${proj ? `&project=${encodeURIComponent(proj)}` : ""}`);
+      const fl = $("#turnFlagged", el).checked;
+      const rows = await j(`/api/turns?q=${encodeURIComponent(q)}${proj ? `&project=${encodeURIComponent(proj)}` : ""}${fl ? "&flagged=1" : ""}`);
       res.innerHTML = rows.length ? `<table>
-        <tr><th>ts</th><th>project / 発話者</th><th>内容(先頭600字)</th></tr>
+        <tr><th></th><th>ts</th><th>project / 発話者</th><th>内容(先頭600字)</th></tr>
         ${rows.map((r) => `<tr>
+          <td><button class="btn mini ghost turn-flag" data-sid="${esc(r.session_id)}"
+                title="この発話を含む会話(セッション)全体に重要フラグを付ける/外す。フラグ付き会話は下の一覧に固定表示されます"
+                >${r.flagged ? "★" : "☆"}</button></td>
           <td class="mono faint" style="white-space:nowrap">${esc(String(r.ts || "").slice(0, 16).replace("T", " "))}</td>
           <td><span class="mono">${keyLabel(r.project_key)}</span><br>
             <span class="chip ${r.role === "user" ? "blue" : ""}">${esc(r.role)}</span>
             <span class="faint">${esc(r.device)}/${esc(r.agent)}</span></td>
           <td style="white-space:pre-wrap">${esc(r.snippet)}</td></tr>`).join("")}
       </table>` : '<span class="faint">ヒットなし。</span>';
+      res.querySelectorAll(".turn-flag").forEach((btn) => {
+        btn.onclick = async () => {
+          const on = btn.textContent === "★";
+          let note = "";
+          if (!on) {
+            note = prompt("フラグのメモ(任意。何が重要だったか一言)") ?? "";
+          }
+          try {
+            await j("/api/flag", { method: "POST", body: JSON.stringify(
+              { op: on ? "remove" : "add", session_id: btn.dataset.sid, note }) });
+            res.querySelectorAll(`.turn-flag[data-sid="${CSS.escape(btn.dataset.sid)}"]`)
+              .forEach((b) => { b.textContent = on ? "☆" : "★"; });
+            loadFlags();
+          } catch (e) { toast(`失敗: ${e.message}`, 5000); }
+        };
+      });
     } catch (e) { res.textContent = `検索失敗: ${e.message}`; }
   }
   $("#turnGo", el).onclick = doSearch;
   $("#turnQ", el).onkeydown = (e) => { if (e.key === "Enter") doSearch(); };
+
+  async function loadFlags() {
+    const box = $("#flagList", el);
+    try {
+      const rows = await j("/api/flags");
+      if (!rows.length) {
+        box.innerHTML = '<span class="faint">フラグ付きの会話はまだありません。検索結果の ☆ で付けられます。</span>';
+        return;
+      }
+      box.innerHTML = `<table>
+        <tr><th></th><th>開始</th><th>project / 端末</th><th>会話の冒頭</th><th>メモ</th><th style="text-align:right">発話数</th></tr>
+        ${rows.map((r) => `<tr>
+          <td><button class="btn mini ghost flag-del" data-sid="${esc(r.session_id)}" title="フラグを外す">★</button></td>
+          <td class="mono faint" style="white-space:nowrap">${esc(String(r.first_ts || "").slice(0, 16).replace("T", " "))}</td>
+          <td><span class="mono">${keyLabel(r.project_key || "")}</span><br><span class="faint">${esc(r.device || "?")}/${esc(r.agent || "?")}</span></td>
+          <td style="white-space:pre-wrap">${esc(r.head || "(冒頭を取得できません)")}</td>
+          <td class="muted">${esc(r.note || "—")}</td>
+          <td class="num">${r.n ?? "?"}</td></tr>`).join("")}
+      </table>`;
+      box.querySelectorAll(".flag-del").forEach((btn) => {
+        btn.onclick = async () => {
+          try {
+            await j("/api/flag", { method: "POST", body: JSON.stringify(
+              { op: "remove", session_id: btn.dataset.sid, note: "" }) });
+            // 検索結果側の★表示も同期する
+            el.querySelectorAll(`.turn-flag[data-sid="${CSS.escape(btn.dataset.sid)}"]`)
+              .forEach((b) => { b.textContent = "☆"; });
+            loadFlags();
+          } catch (e) { toast(`失敗: ${e.message}`, 5000); }
+        };
+      });
+    } catch (e) { box.textContent = `取得失敗: ${e.message}`; }
+  }
 
   function drawAutoMemory() {
     const am = N.auto_memory || [];
@@ -433,6 +570,7 @@ function renderFacts(el) {
 
   drawProjects();
   loadFacts();
+  loadFlags();
   drawAutoMemory();
 }
 
@@ -462,6 +600,7 @@ function renderSkills(el) {
     let label = src, chips = "";
     if (src === "user") label = "user — ~/.claude/skills";
     else if (src === "claude-config") label = "claude-config — git で全端末に配布";
+    else if (src === "codex") label = "codex — ~/.codex/skills(Codex 専用)";
     else if (src.startsWith("project:")) label = `project — ${src.slice(8)}/.claude`;
     else if (src.startsWith("plugin:")) label = `plugin — ${src.slice(7)}`;
     chips += first.editable
@@ -471,18 +610,44 @@ function renderSkills(el) {
     return `${esc(label)} — ${list.length} 件${chips}`;
   }
 
-  function grouped(items, nameHead) {
+  // エージェント列はサーバの usage キーから動的に作る(将来 opencode 等が増えても列が自動で増える)
+  const AGENT_COL = { claude: "Claude 発動", codex: "Codex 参照" };
+  const AGENT_TITLE = {
+    claude: "Claude Code の Skill ツール呼び出し回数。構造化された呼び出しがログに残るため、確実に使われた回数",
+    codex: "Codex が SKILL.md を読んだ回数。Codex には Skill ツールが無く、シェルでの手順書読み取りしかログに残らないため近似値(検討だけして使わなかった場合も数え、読み直さない再利用は数えない)",
+  };
+  function usageAgents(items) {
+    const set = new Set();
+    for (const s of items) for (const a of Object.keys(s.usage || {})) set.add(a);
+    return [...Object.keys(AGENT_COL).filter((a) => set.has(a)),
+            ...[...set].filter((a) => !(a in AGENT_COL)).sort()];
+  }
+  const useCount = (s, a) => ((s.usage || {})[a] || {}).count || 0;
+  const useTotal = (s, agents) => agents.reduce((n, a) => n + useCount(s, a), 0);
+  const useLast = (s, agents) => agents.map((a) => ((s.usage || {})[a] || {}).last || "")
+    .reduce((x, y) => (y > x ? y : x), "");
+
+  function grouped(items, nameHead, usage = false) {
+    const agents = usage ? usageAgents(items) : [];
     const groups = {};
     for (const s of items) (groups[s.source] ??= []).push(s);
-    return Object.entries(groups).map(([src, list]) => `
+    return Object.entries(groups).map(([src, list]) => {
+      const rows = usage
+        ? [...list].sort((a, b) => useTotal(b, agents) - useTotal(a, agents)
+            || a.name.localeCompare(b.name))
+        : list;
+      return `
       <h2 class="section">${srcHead(src, list)}</h2>
       <div class="card"><table>
-        <tr><th>${nameHead}</th><th>説明(frontmatter)</th><th style="text-align:right">サイズ</th></tr>
-        ${list.map((s) => `<tr>
+        <tr><th>${nameHead}</th>${agents.map((a) => `<th style="text-align:right" title="${esc(AGENT_TITLE[a] || "")}">${esc(AGENT_COL[a] || a)}</th>`).join("")}${usage ? "<th>最終使用</th>" : ""}<th>説明(frontmatter)</th><th style="text-align:right">サイズ</th></tr>
+        ${rows.map((s) => `<tr>
           <td class="mono" style="white-space:nowrap">${esc(s.name)}</td>
+          ${agents.map((a) => `<td class="num">${useCount(s, a) > 0 ? `<strong>${useCount(s, a)}</strong>` : '<span class="faint">0</span>'}</td>`).join("")}
+          ${usage ? `<td class="mono faint">${esc(useLast(s, agents) || "—")}</td>` : ""}
           <td class="muted">${esc(s.description || "—")}</td>
           <td class="num">${kb(s.bytes)}</td></tr>`).join("")}
-      </table></div>`).join("");
+      </table></div>`;
+    }).join("");
   }
 
   const B = S.builtin || {};
@@ -506,9 +671,11 @@ function renderSkills(el) {
         <td class="muted">${esc(r.description || "—")}</td></tr>`).join("")}
     </table></div>`;
 
-  el.innerHTML = candHtml
+  el.innerHTML = '<div class="note info"><span class="tag">このタブ</span><span>パイプラインの蒸留段: 繰り返し作業を手順書(SKILL.md)として固定化したものがスキルです。夜間バッチが turns から繰り返しを発掘するとスキル候補としてここに並びます。使用実績は claude/codex 同列で数えます。</span></div>'
+    + candHtml
     + '<div class="note info"><span class="tag">範囲</span><span>/context に出る構成要素のうちファイル実体があるもの(スキル・コマンド・エージェント)を出所別に、実体が無いもの(内蔵・実行時組み立て)を最後にまとめています。「編集不可」のものを変えたいときは、プラグインなら配布元リポジトリ、内蔵なら Claude Code 本体の更新でしか変わりません。</span></div>'
-    + grouped(S.skills, "スキル(Skill ツールで発動)")
+    + '<div class="note info"><span class="tag">発動と参照</span><span>言葉を分けているのは数字の確度が違うためです。<b>Claude 発動</b> = Claude Code の Skill ツール呼び出し回数。構造化された呼び出しがログ(~/.claude/projects)に残るので、確実に使われた回数です。<b>Codex 参照</b> = Codex が SKILL.md を読んだ回数。Codex には Skill ツールが無く、シェルで手順書を読む形しかログ(~/.codex/sessions)に残らないため近似値です — 検討だけして使わなかった場合も数え、読み直さずに再利用した場合は数えません。共通の限界: 手順を手作業でなぞった使用、他端末、ローテートで消えた古いログは含まず、0 = 記録なし(未使用とは限らない)。</span></div>'
+    + grouped(S.skills, "スキル(Skill ツールで発動)", true)
     + grouped(S.commands || [], "コマンド(/ で発動)")
     + grouped(S.agents || [], "エージェント(Agent ツールの subagent_type)")
     + builtinHtml;
@@ -532,9 +699,9 @@ function renderHooks(el) {
   const events = [...new Set(all.map((h) => h.event))];
   events.sort((a, b) => (order.indexOf(a) === -1 ? 99 : order.indexOf(a)) - (order.indexOf(b) === -1 ? 99 : order.indexOf(b)));
 
-  const badge = (s) => s === "applied" ? '<div class="sync-on" style="font-size:12px">適用済</div>'
-    : s === "pending" ? '<div class="sync-pend" style="font-size:12px">未適用</div>'
-    : s === "unsupported" ? '<div><span class="chip err">不可</span></div>' : "";
+  const badge = (s) => s === "applied" ? '<div class="sync-on" style="font-size:12px" title="manifest の宣言どおり、このエージェントの設定に反映済み">適用済</div>'
+    : s === "pending" ? '<div class="sync-pend" style="font-size:12px" title="宣言はあるが設定に未反映。「適用」ボタンで反映される">未適用</div>'
+    : s === "unsupported" ? '<div><span class="chip err" title="このエージェントはこのイベントに対応していない">不可</span></div>' : "";
   const manifestRows = S.manifest.rows.map((r) => {
     const cell = (t) => {
       const chk = `<input type="checkbox" data-mi="${r.index}" data-target="${t}"${r.targets.includes(t) ? " checked" : ""}>`;
@@ -552,6 +719,7 @@ function renderHooks(el) {
   }).join("");
 
   el.innerHTML = `
+    <div class="note info"><span class="tag">hookとは</span><span>決まったタイミング(イベント)で必ず実行される仕込みです。判断をモデル任せにせず機械的に強制したいもの(記憶の収集、作業規律の注入、push 前チェック等)をここに置きます。イベント名は発火時点を表します: SessionStart/End = セッション開始/終了、UserPromptSubmit = 毎プロンプト送信時、PreToolUse = ツール実行直前、Stop = 応答完了時。</span></div>
     <h2 class="section">hooks-manifest(宣言的フック管理)</h2>
     <div class="note info"><span class="tag">仕組み</span><span>正本は <span class="mono">${esc(S.manifest.path)}</span>(git 配布)。チェックで対象 CLI を選び「保存して適用」すると、manifest を書き換えて両設定へ展開します(SessionStart でも自動適用)。手書き・プラグインのフックには触れません。フックの追加・文言変更は manifest を直接編集してください。</span></div>
     ${S.manifest.exists ? `<div class="card"><table>
@@ -618,11 +786,15 @@ function renderHooks(el) {
 
 function renderCollect(el) {
   el.innerHTML = `
+    <div class="note info"><span class="tag">このタブ</span><span>パイプラインの収集段の管理と健全性確認です。各端末の hook がセッションを spool(ローカル送信待ちキュー ~/.claude-spool)に書き、NAS の turns へ送ります。ここでは収集から除外するもの(sync-exclude)、NAS 側夜間バッチの実行状況、端末側 hook スクリプト、配布リポジトリの状態を確認します。</span></div>
     <h2 class="section">収集除外 sync-exclude.txt(全端末に配布・手動管理で安全に編集可)</h2>
     <div class="card">
       <div class="toolrow"><span class="faint">${esc(S.sync_exclude.path)}</span>
         <span style="flex:1"></span><button class="btn mini" id="syncSave">保存</button></div>
-      <textarea class="editor" id="syncText" style="min-height:260px" spellcheck="false"></textarea>
+      <div class="editor-wrap">
+        <div class="editor-gutter" id="syncGutter" aria-hidden="true"></div>
+        <textarea class="editor" id="syncText" style="min-height:260px" spellcheck="false"></textarea>
+      </div>
     </div>
 
     <h2 class="section">NAS 夜間バッチ(crontab)</h2>
@@ -651,6 +823,7 @@ function renderCollect(el) {
     </div>`;
 
   $("#syncText", el).value = S.sync_exclude.content;
+  attachLineNumbers($("#syncText", el), $("#syncGutter", el));
   $("#syncSave", el).onclick = async () => {
     try {
       const r = await j("/api/save", { method: "POST", body: JSON.stringify(
@@ -681,7 +854,7 @@ function renderRouting(el) {
     ? R.parsed[dev].projects : null;
 
   el.innerHTML = `
-    <div class="note info"><span class="tag">仕組み</span><span>この表で「どの端末にどのプロジェクトの記憶(index)を配るか」を決めます。チェック=配る。保存すると各端末に配られ、次にセッションを開いたときに反映されます。まだ一度も設定していない端末は、チェックを付けて保存した時からこの表に従います。設定ファイル(routing.json)は git で全端末に配布され、各端末が自分の端末名のエントリだけを読みます(この端末のコピー: <span class="mono">${esc(R.path)}</span>)。</span></div>
+    <div class="note info"><span class="tag">仕組み</span><span>パイプラインの配布段です。この表で「どの端末にどのプロジェクトの記憶(index)を配るか」を決めます。チェック=配る。保存すると各端末に配られ、次にセッションを開いたときに反映されます。まだ一度も設定していない端末は、チェックを付けて保存した時からこの表に従います。設定ファイル(routing.json)は git で全端末に配布され、各端末が自分の端末名のエントリだけを読みます(この端末のコピー: <span class="mono">${esc(R.path)}</span>)。</span></div>
     ${R.error ? `<div class="note warn"><span class="tag">解析失敗</span><span>routing.json: ${esc(R.error)}</span></div>` : ""}
     <div class="card" style="margin-top:14px">
       <table>
@@ -779,7 +952,7 @@ function renderMessages(el) {
           ${keys.map((k) => `<option>${esc(k)}</option>`).join("")}</select>
       </div>
       <div class="toolrow">
-        <input type="text" id="msgBody" placeholder="本文(1〜3文)" style="flex:1">
+        <span class="lnfield" style="flex:1"><span class="ln1" aria-hidden="true">1</span><input type="text" id="msgBody" placeholder="本文(1〜3文)"></span>
         <button class="btn mini" id="msgSend">送信</button>
       </div>
     </div>

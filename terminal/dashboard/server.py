@@ -150,6 +150,157 @@ def _md_entry(f, fallback_name, source, editable, enabled=None, kind="skill"):
             "kind": kind, "editable": editable, "enabled": enabled}
 
 
+_USAGE_CACHE = {"sig": None, "data": None}
+
+
+def skill_usage():
+    """全エージェントのスキル使用集計。{agent名: {呼び出し名: {count,last}}} を返す。
+
+    エージェントはハードコードで増やさない前提の入れ物。新しいエージェントの
+    集計器を足したらここに1行追加するだけで UI 列は動的に増える。
+    """
+    return {"claude": claude_skill_usage(), "codex": codex_skill_usage()}
+
+
+def claude_skill_usage():
+    """~/.claude/projects/*.jsonl を走査し Skill ツール呼び出しを集計する。
+
+    返り値: {呼び出し名: {"count": int, "last": ISO文字列}}。
+    呼び出し名は Skill tool の input.skill(user/claude-config は素の名、
+    plugin は "<plugin>:<skill>")。
+
+    限界(UI にも注記):
+      - Skill ツール経由の発動のみ。手順を手作業でなぞった場合は残らない。
+      - この端末のローカルログのみ。全端末横断は NAS turns 側。
+      - projects/ に残っているセッション分だけ(古いログはローテートで消える)。
+    """
+    if DEMO:
+        return {}
+    proj_glob = CLAUDE_DIR / "projects"
+    # glob と stat の間にローテートで消えたファイルは無視する(1本欠けても全体を止めない)
+    files = []
+    sig_parts = []
+    for p in sorted(proj_glob.glob("*/*.jsonl")):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        files.append(str(p))
+        sig_parts.append((str(p), st.st_mtime_ns, st.st_size))
+    sig = tuple(sig_parts)
+    if _USAGE_CACHE["sig"] == sig and _USAGE_CACHE["data"] is not None:
+        return _USAGE_CACHE["data"]
+    agg = {}
+    for f in files:
+        try:
+            with open(f, encoding="utf-8") as fh:
+                for line in fh:
+                    if '"Skill"' not in line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    ts = o.get("timestamp")
+                    for c in ((o.get("message") or {}).get("content") or []):
+                        if not (isinstance(c, dict) and c.get("type") == "tool_use"
+                                and c.get("name") == "Skill"):
+                            continue
+                        sk = (c.get("input") or {}).get("skill")
+                        if not sk:
+                            continue
+                        e = agg.setdefault(sk, {"count": 0, "last": None})
+                        e["count"] += 1
+                        if ts and (e["last"] is None or ts > e["last"]):
+                            e["last"] = ts
+        except Exception:  # noqa: BLE001 — 壊れたログ1本で全体を止めない
+            continue
+    _USAGE_CACHE["sig"] = sig
+    _USAGE_CACHE["data"] = agg
+    return agg
+
+
+# Codex の rollout ログ用: ファイルごとの (mtime,size) → 集計結果キャッシュ
+_CODEX_USAGE_CACHE = {"files": {}}
+_CODEX_SKILL_RE = re.compile(r'/skills/(?:[^/\s"\']+/)*([^/\s"\']+)/SKILL\.md')
+_CODEX_CALL_TYPES = ("function_call", "custom_tool_call", "local_shell_call")
+
+
+def _codex_scan_file(path):
+    """rollout ログ1本から {skill名: {count,last}} を抽出する。
+
+    tool call の payload に現れる /skills/<name>/SKILL.md だけを数える
+    (session_meta 等の指示文に含まれる SKILL.md 言及は対象外)。
+    同一ターン内の再読(分割 cat 等)は1回に数える。
+    """
+    per = {}
+    seen = set()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "SKILL.md" not in line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                p = o.get("payload") or {}
+                if p.get("type") not in _CODEX_CALL_TYPES:
+                    continue
+                blob = json.dumps(
+                    {k: p.get(k) for k in ("name", "input", "arguments", "command")},
+                    ensure_ascii=False)
+                ts = o.get("timestamp")
+                turn = str(p.get("internal_chat_message_metadata_passthrough") or ts)
+                for m in _CODEX_SKILL_RE.finditer(blob):
+                    name = m.group(1)
+                    if (name, turn) in seen:
+                        continue
+                    seen.add((name, turn))
+                    e = per.setdefault(name, {"count": 0, "last": None})
+                    e["count"] += 1
+                    if ts and (e["last"] is None or ts > e["last"]):
+                        e["last"] = ts
+    except Exception:  # noqa: BLE001 — 壊れたログ1本で全体を止めない
+        pass
+    return per
+
+
+def codex_skill_usage():
+    """~/.codex/sessions/**/rollout-*.jsonl から SKILL.md 読み取り(参照)を集計する。
+
+    Codex には Claude の Skill ツールに相当する構造化呼び出しが無く、skill の
+    使用はシェル等で SKILL.md を読む形でログに残る。読んだ=使ったとは限らない
+    (検討のみの場合を含む)ため、UI では「参照」として表示し注記する。
+    """
+    if DEMO:
+        return {}
+    root = Path.home() / ".codex" / "sessions"
+    cache = _CODEX_USAGE_CACHE["files"]
+    agg = {}
+    seen_paths = set()
+    for p in sorted(root.glob("**/rollout-*.jsonl")):
+        sp = str(p)
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        seen_paths.add(sp)
+        key = (st.st_mtime_ns, st.st_size)
+        ent = cache.get(sp)
+        if ent is None or ent[0] != key:
+            ent = (key, _codex_scan_file(p))
+            cache[sp] = ent
+        for name, e in ent[1].items():
+            a = agg.setdefault(name, {"count": 0, "last": None})
+            a["count"] += e["count"]
+            if e["last"] and (a["last"] is None or e["last"] > a["last"]):
+                a["last"] = e["last"]
+    for sp in [k for k in cache if k not in seen_paths]:
+        del cache[sp]
+    return agg
+
+
 def collect_skills():
     skills = []
     seen = set()
@@ -169,6 +320,7 @@ def collect_skills():
 
     add_dir(CLAUDE_DIR / "skills", "user")
     add_dir(CONFIG_DIR / "skills", "claude-config")
+    add_dir(Path.home() / ".codex" / "skills", "codex")  # Codex 専用スキルも同列に扱う
     # プロジェクト側 .claude/skills(/context の Project 欄)。~/ 直下プロジェクトは
     # user(~/.claude/skills)と同一ディレクトリになるが、resolve 済みパスの seen で重複排除される
     for proj in claude_projects():
@@ -187,6 +339,24 @@ def collect_skills():
                           editable=False, enabled=pr["enabled"])
             e["name"] = f"{pr['plugin']}:{e['name']}"  # /context の表示規則に合わせる
             skills.append(e)
+
+    usage = skill_usage()  # {agent: {呼び出し名: {count,last}}}
+    # 同名/同dirのスキルが複数ソースにあると1つの使用実績を全部へ誤帰属する。
+    # キーを主張するレコードが一意のときだけ帰属し、曖昧なら未計上(0)のまま残す
+    claims = {}
+    for s in skills:
+        for k in {s["name"], s["dir"]}:
+            claims.setdefault(k, []).append(s)
+    for s in skills:
+        s["usage"] = {}
+        for agent, table in usage.items():
+            u = {}
+            for k in (s["name"], s["dir"]):
+                if k in table and len(claims[k]) == 1:
+                    u = table[k]
+                    break
+            s["usage"][agent] = {"count": u.get("count", 0),
+                                 "last": (u.get("last") or "")[:10]}
     return skills
 
 
@@ -588,16 +758,56 @@ def get_facts(project):
         "order by id desc")
 
 
-def search_turns(q, project, limit=50):
+def search_turns(q, project, limit=50, flagged_only=False):
     if DEMO:
         return []
     cond = f"content &@~ {dollar_quote(q)}"
     if project:
         cond += f" and project_key = {dollar_quote(project)}"
+    if flagged_only:
+        cond += " and exists (select 1 from flags f where f.session_id = turns.session_id)"
     return sql_json(
-        "select id, device, agent, project_key, role, ts, "
-        "left(content, 600) snippet from turns "
+        "select id, device, agent, project_key, session_id, role, ts, "
+        "left(content, 600) snippet, "
+        "exists (select 1 from flags f where f.session_id = turns.session_id) flagged "
+        "from turns "
         f"where {cond} order by ts desc limit {int(limit)}")
+
+
+def list_flags():
+    """フラグ付き会話の一覧。会話の先頭ユーザー発話を見出しとして添える。"""
+    if DEMO:
+        return []
+    return sql_json(
+        "select fl.session_id, fl.note, fl.created_by, fl.created_at, "
+        "h.device, h.agent, h.project_key, h.ts first_ts, h.head, a.n from flags fl "
+        "left join lateral ("
+        "  select device, agent, project_key, ts, left(content, 200) head "
+        "  from turns where session_id = fl.session_id and role = 'user' "
+        "  and content not like '<%' "  # 注入タグ(<recommended_plugins>等)で始まる行は見出しに使わない
+        "  order by ts limit 1) h on true "
+        "left join lateral ("
+        "  select count(*) n from turns where session_id = fl.session_id) a on true "
+        "order by fl.created_at desc")
+
+
+def flag_op(op, session_id, note):
+    """重要な会話のフラグ付与/解除。session_id 単位(turns 本体は変更しない)。"""
+    if not session_id:
+        raise ValueError("session_id がありません")
+    today = datetime.now().strftime("%Y%m%d")
+    by = dollar_quote(f"dashboard-{today}")
+    sid = dollar_quote(session_id)
+    if op == "add":
+        sql = (f"insert into flags (session_id, note, created_by) values "
+               f"({sid}, {dollar_quote(note or '')}, {by}) "
+               "on conflict (session_id) do update set note = excluded.note "
+               "returning session_id;")
+    elif op == "remove":
+        sql = f"delete from flags where session_id = {sid} returning session_id;"
+    else:
+        raise ValueError(f"unknown op: {op}")
+    return run_sql(sql)
 
 
 def fact_op(op, project, content, fact_id):
@@ -670,6 +880,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # UI更新のたびに古いJS/CSSが残らないよう常に再検証させる
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 
@@ -700,7 +912,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"content": rows[0]["content"] if rows else ""})
             elif url.path == "/api/turns":
                 self.send_json(search_turns(q["q"][0],
-                                            q.get("project", [None])[0]))
+                                            q.get("project", [None])[0],
+                                            flagged_only=q.get("flagged", ["0"])[0] == "1"))
+            elif url.path == "/api/flags":
+                self.send_json(list_flags())
             elif url.path == "/api/messages":
                 self.send_json(list_messages())
             else:
@@ -743,6 +958,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(send_message(body.get("to_device"),
                                             body.get("to_project"),
                                             body.get("body")))
+            elif self.path == "/api/flag":
+                out = flag_op(body.get("op"), body.get("session_id"),
+                              body.get("note", ""))
+                self.send_json({"result": out})
             else:
                 self.send_error(404)
         except ConflictError as e:
