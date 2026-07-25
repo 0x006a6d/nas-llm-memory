@@ -122,21 +122,50 @@ def main():
         print("FAILED: nightly/backfillが実行中です。終了後に再実行してください", file=sys.stderr)
         sys.exit(1)
 
-    run_label = f"edges-{time.strftime('%Y%m%d')}"
-    keys = [args.key] if args.key else [r["k"] for r in psql_json(
-        "SELECT json_agg(json_build_object('k', project_key)) FROM "
-        "(SELECT project_key, count(*) AS n FROM current_facts "
-        " GROUP BY project_key ORDER BY n DESC) s;")]
+    # 実行の成否をbatch_runsへ残す(dashboardの監視対象。エッジ挿入はペア単位で
+    # 確定済みなので、失敗時の補償は不要 — 記録だけfailedにする)
+    run_id = int(psql("INSERT INTO batch_runs (status, notes) "
+                      "VALUES ('running', 'edges') RETURNING id;"))
+    total_pairs = total_related = total_unrelated = 0
+    try:
+        run_label = f"edges-{time.strftime('%Y%m%d')}"
+        keys = [args.key] if args.key else [r["k"] for r in psql_json(
+            "SELECT json_agg(json_build_object('k', project_key)) FROM "
+            "(SELECT project_key, count(*) AS n FROM current_facts "
+            " GROUP BY project_key ORDER BY n DESC) s;")]
 
-    total_pairs = 0
-    for key in keys:
-        n_pairs, related, unrelated = judge_key(key, args.pairs, args.yes, run_label)
-        total_pairs += n_pairs
-        if n_pairs:
-            print(f"{time.strftime('%F %T')} edges {key}: "
-                  f"pairs={n_pairs} extends={related} none={unrelated}")
-    if total_pairs == 0:
-        print(f"{time.strftime('%F %T')} edges: 未判定ペアなし")
+        for key in keys:
+            n_pairs, related, unrelated = judge_key(key, args.pairs, args.yes, run_label)
+            total_pairs += n_pairs
+            total_related += related
+            total_unrelated += unrelated
+            if n_pairs:
+                print(f"{time.strftime('%F %T')} edges {key}: "
+                      f"pairs={n_pairs} extends={related} none={unrelated}")
+        if total_pairs == 0:
+            print(f"{time.strftime('%F %T')} edges: 未判定ペアなし")
+        # 列挙されたのに記録されなかったペア(中止・判定形式不一致)が残ったrunは
+        # successにしない — 「pairsが減らないまま毎晩success」を dashboard で見抜けるように
+        skipped = total_pairs - total_related - total_unrelated
+        status = "success" if skipped == 0 else "failed"
+        notes = (f"edges pairs={total_pairs} extends={total_related} "
+                 f"none={total_unrelated}" + (f" skipped={skipped}" if skipped else ""))
+        psql(f"UPDATE batch_runs SET finished_at=now(), status={q(status)}, "
+             f"notes={q(notes)} WHERE id={run_id};")
+        if skipped:
+            sys.exit(1)
+    except SystemExit:
+        raise
+    except BaseException as exc:  # Ctrl-C(KeyboardInterrupt)もrunning行を残さずfailedにする
+        print(f"FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        note = (f"edges FAILED(pairs={total_pairs} extends={total_related} "
+                f"none={total_unrelated}): {exc}")[:300]
+        try:
+            psql(f"UPDATE batch_runs SET finished_at=now(), status='failed', "
+                 f"notes={q(note)} WHERE id={run_id};")
+        except Exception:
+            pass
+        sys.exit(1)
 
 
 if __name__ == "__main__":

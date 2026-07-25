@@ -250,9 +250,13 @@ def fail(run_id, msg: str):
         compensations = (
             ("facts", lambda: psql(f"DELETE FROM facts WHERE created_by={q('run-' + str(run_id))};")),
             ("repo", reset_repo),
+            # notesは置換でなく追記して実行中rowの種別(P2/backfill-distill)を残す
+            # (dashboardが失敗rowをジョブ種別に分類できるように)。既存notesは
+            # 種別マーカーの短文の想定だが、長くてもエラー文が消えないよう80字で切る
             ("batch_runs", lambda: psql(
                 f"UPDATE batch_runs SET finished_at=now(), status='failed', "
-                f"notes={q(msg[:500])} WHERE id={run_id};")),
+                f"notes=left(left(coalesce(notes,''),80) || ' FAILED: ' || {q(msg[:400])}, 500) "
+                f"WHERE id={run_id};")),
         )
         for label, action in compensations:
             try:
