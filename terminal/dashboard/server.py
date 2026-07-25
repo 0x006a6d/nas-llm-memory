@@ -5,7 +5,7 @@
 依存:  python3 標準ライブラリのみ。NAS への問い合わせは ssh nas 経由(~/.ssh/config の Host nas)。
 
 編集の意味論(設計書§6 の規約に従う):
-  - facts への操作が恒久調整。index.md は夜間バッチ(03:30)が current_facts から全再生成する。
+  - facts への操作が恒久調整。index.md は夜間バッチ(03:00)が current_facts から全再生成する。
   - 追加   = INSERT (replaces=NULL)
   - 修正   = INSERT (replaces=旧id)  … nightly の ORGANIZE と同じ表現
   - 撤去   = UPDATE retired_by=自id … view(retired_by IS NULL)から外れる。nightly に retire 経路が
