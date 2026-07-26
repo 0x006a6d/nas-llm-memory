@@ -36,6 +36,16 @@ CLAUDE_TIMEOUT = 600           # claude 1呼び出しの上限秒
 
 GIT_ENV = ["-c", "user.name=nightly-batch", "-c", "user.email=nightly@nas.local"]
 
+# バッチ共通設定(batch/config.json — 配置先ローカルの設定ファイル。リポジトリには
+# config.example.json だけを置き、deploy_nas_batch.sh が無いときのみ例から作る)。
+# model が空・ファイル無しなら --model を付けず CLI デフォルトで動く(従来挙動)
+BATCH_CONFIG_PATH = SYSTEM_DIR / "batch" / "config.json"
+try:
+    BATCH_MODEL = str(json.loads(
+        BATCH_CONFIG_PATH.read_text(encoding="utf-8")).get("model") or "")
+except (OSError, ValueError):
+    BATCH_MODEL = ""
+
 
 # ---------------------------------------------------------------- DB(psql経由・依存なし)
 
@@ -77,7 +87,9 @@ def _log_usage(label: str, envelope: dict) -> None:
         cost = f"${float(raw):.4f}"
     except (TypeError, ValueError):
         cost = f"unknown({raw!r})"
-    log(f"  claude-usage {label}: in={u.get('input_tokens', 0)}"
+    # 実際に使われたモデルも残す(設定ドリフトや意図しないデフォルト変更の検知用)
+    models = ",".join((envelope.get("modelUsage") or {}).keys())
+    log(f"  claude-usage {label}: model={models or '?'} in={u.get('input_tokens', 0)}"
         f" cache_w={u.get('cache_creation_input_tokens', 0)}"
         f" cache_r={u.get('cache_read_input_tokens', 0)}"
         f" out={u.get('output_tokens', 0)} cost={cost}")
@@ -85,10 +97,13 @@ def _log_usage(label: str, envelope: dict) -> None:
 
 def ask_claude(prompt: str, label: str) -> str:
     """全ツール無効のヘッドレスclaude。応答テキストを返す。"""
+    cmd = ["claude", "-p", "--output-format", "json",
+           "--disallowedTools", "*",
+           "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
+    if BATCH_MODEL:
+        cmd += ["--model", BATCH_MODEL]
     r = subprocess.run(
-        ["claude", "-p", "--output-format", "json",
-         "--disallowedTools", "*",
-         "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'],
+        cmd,
         input=prompt, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
         env={**os.environ, "CLAUDE_SPOOL_SKIP": "1"},  # バッチ自身のセッションは収集しない
     )

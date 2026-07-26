@@ -1,0 +1,4 @@
+{
+  "_comment": "バッチ共通設定のサンプル。実物は /volume2/claude-system/batch/config.json(配置先ローカル、gitに入れない)。deploy_nas_batch.sh は config.json が無いときだけこの例から作り、既存の設定は上書きしない。model が空だと claude CLI のデフォルトで動く(意図しないデフォルト変更に気づけないため、明示指定を推奨)。",
+  "model": "claude-opus-4-6"
+}

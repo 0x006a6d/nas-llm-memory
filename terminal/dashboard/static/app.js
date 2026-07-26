@@ -861,6 +861,12 @@ function renderCollect(el) {
     </div>
 
     <h2 class="section">NAS 夜間バッチ(crontab)</h2>
+    ${(() => {
+      const bc = N.batch_config;
+      return bc && bc.model
+        ? `<div class="note info"><span class="tag">モデル</span><span>バッチの claude -p は <span class="mono">${esc(bc.model)}</span> で実行(設定: <span class="mono">/volume2/claude-system/batch/config.json</span>。実際に使われたモデルは各 batch/*.log の claude-usage 行に model= で記録)。</span></div>`
+        : `<div class="note warn"><span class="tag">モデル未設定</span><span>NAS の batch/config.json が無いか model が空です。CLI デフォルトで動くため、デフォルト変更で夜間バッチのモデルが黙って変わります。</span></div>`;
+    })()}
     <div class="card"><code class="block">${esc(S.crontab)}</code></div>
 
     <h2 class="section">バッチ実行履歴(直近${N.batch_runs.length}件)</h2>

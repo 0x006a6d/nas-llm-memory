@@ -786,6 +786,20 @@ def state():
 
 # ---------------------------------------------------------------- NAS queries
 
+def nas_batch_config():
+    """NAS のバッチ共通設定(/volume2/claude-system/batch/config.json)。無し/読めなければ None。"""
+    try:
+        proc = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", SSH_TARGET,
+             "cat /volume2/claude-system/batch/config.json"],
+            capture_output=True, timeout=15)
+        if proc.returncode != 0:
+            return None
+        return json.loads(proc.stdout.decode(errors="replace"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def nas_snapshot():
     if DEMO:
         data = json.loads((DEMO_DIR / "nas.json").read_text(encoding="utf-8"))
@@ -821,6 +835,7 @@ def nas_snapshot():
             "from turns where cwd is not null and cwd <> '' "
             "group by device, project_key, cwd) t "
             "where rn = 1 order by device, project_key"),
+        "batch_config": nas_batch_config(),
         "fetched_at": datetime.now().strftime("%m-%d %H:%M:%S"),
     }
     CACHE_DIR.mkdir(exist_ok=True)
