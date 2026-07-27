@@ -32,6 +32,11 @@ NAS への問い合わせは `ssh nas`(~/.ssh/config)経由。NAS 系データ�
 - 記録 (facts) — current_facts の閲覧と 追加/修正/撤去、turns の PGroonga 全文検索、
                  重要な会話のフラグ付け(NAS flags テーブル、session_id 単位、全端末共通)、
                  auto memory スナップショット(各端末の内蔵メモリ取り込み履歴)の閲覧
+- 書架 (決裁)  — 起案・決裁ワークフロー(ringi)の完結文書の閲覧と後閲。文書番号・決裁欄・
+                 伺い文・回議録・登載 facts を表示し、後閲印またはメモ付き差し戻し
+                 (差し戻しは翌晩の便で決裁者が再審理)。skill 文書は後閲印が施行の条件。
+                 専決規程(NAS batch/config.json の roles / ringi 主要フラグ)の編集も
+                 このタブ(保存時に .bak 退避、反映は翌晩のバッチから)
 - スキル       — /context に出る構成要素の一覧を出所別に表示:
                  スキル(user / claude-config / codex ~/.codex/skills / 各プロジェクト
                  .claude/skills / プラグイン / Codex プラグイン3層 ~/.codex/plugins/cache
