@@ -24,8 +24,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-SYSTEM_DIR = Path("/volume2/claude-system")
-REPO_DIR = Path.home() / "claude-config"
+# 配置先(既定はNAS)。ローカル検証用に環境変数で差し替えられる
+SYSTEM_DIR = Path(os.environ.get("CLAUDE_SYSTEM_DIR", "/volume2/claude-system"))
+REPO_DIR = Path(os.environ.get("CLAUDE_REPO_DIR", str(Path.home() / "claude-config")))
 INDEX_MAX_LINES = 150          # 設計書§6.1-4(実測で調整)
 INDEX_MAX_BYTES = 30_000       # Codexのproject_doc_max_bytes既定(32KiB)より安全側(追補§3.3)
 TURN_SNIPPET_CHARS = 1500      # 1ターンあたりの最大文字数
@@ -38,13 +39,15 @@ GIT_ENV = ["-c", "user.name=nightly-batch", "-c", "user.email=nightly@nas.local"
 
 # バッチ共通設定(batch/config.json — 配置先ローカルの設定ファイル。リポジトリには
 # config.example.json だけを置き、deploy_nas_batch.sh が無いときのみ例から作る)。
-# model が空・ファイル無しなら --model を付けず CLI デフォルトで動く(従来挙動)
+# model が空・ファイル無しなら --model を付けず CLI デフォルトで動く(従来挙動)。
+# roles/ringi(専決規程)の解釈は ringi.model_for / ringi.ringi_settings が行う
 BATCH_CONFIG_PATH = SYSTEM_DIR / "batch" / "config.json"
 try:
-    BATCH_MODEL = str(json.loads(
-        BATCH_CONFIG_PATH.read_text(encoding="utf-8")).get("model") or "")
+    _cfg = json.loads(BATCH_CONFIG_PATH.read_text(encoding="utf-8"))
+    BATCH_CONFIG = _cfg if isinstance(_cfg, dict) else {}
 except (OSError, ValueError):
-    BATCH_MODEL = ""
+    BATCH_CONFIG = {}
+BATCH_MODEL = str(BATCH_CONFIG.get("model") or "")
 
 
 # ---------------------------------------------------------------- DB(psql経由・依存なし)
@@ -95,13 +98,18 @@ def _log_usage(label: str, envelope: dict) -> None:
         f" out={u.get('output_tokens', 0)} cost={cost}")
 
 
-def ask_claude(prompt: str, label: str) -> str:
-    """全ツール無効のヘッドレスclaude。応答テキストを返す。"""
+def ask_claude(prompt: str, label: str, model: str | None = None) -> str:
+    """全ツール無効のヘッドレスclaude。応答テキストを返す。
+
+    model: 専決規程(config.jsonのroles)で役割ごとに差し替える。
+    None=共通設定BATCH_MODEL(従来挙動)、空文字=明示的にCLIデフォルト。
+    """
     cmd = ["claude", "-p", "--output-format", "json",
            "--disallowedTools", "*",
            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
-    if BATCH_MODEL:
-        cmd += ["--model", BATCH_MODEL]
+    m = BATCH_MODEL if model is None else model
+    if m:
+        cmd += ["--model", m]
     r = subprocess.run(
         cmd,
         input=prompt, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,

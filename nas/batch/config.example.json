@@ -1,4 +1,21 @@
 {
   "_comment": "バッチ共通設定のサンプル。実物は /volume2/claude-system/batch/config.json(配置先ローカル、gitに入れない)。deploy_nas_batch.sh は config.json が無いときだけこの例から作り、既存の設定は上書きしない。model が空だと claude CLI のデフォルトで動く(意図しないデフォルト変更に気づけないため、明示指定を推奨)。",
-  "model": "claude-opus-4-6"
+  "model": "claude-opus-4-6",
+  "_comment_roles": "専決規程: 役割別の担当モデル。kian=起案(事実候補の調べ上げ)、shinsa=審査(課長専決)、kessai=決裁(部長。置換/撤回/矛盾の上申案件)、enrich=index生成。未指定の役割は model にフォールバック。",
+  "roles": {
+    "kian": "claude-haiku-4-5-20251001",
+    "shinsa": "claude-sonnet-5",
+    "kessai": "claude-opus-4-6",
+    "enrich": "claude-sonnet-5"
+  },
+  "_comment_ringi": "起案・決裁ワークフローの規程。enabled=false なら従来パイプラインのまま(移行スイッチ)。trial=true で起案モデルの並行比較(第1期試行)。max_*_rounds は差し戻し往復の上限(超過は廃案)。skill_auto_execute=false は skill の施行に人間の後閲印を要する。index_delete_ratio は index改定の削除行がこの割合を超えたら上申。",
+  "ringi": {
+    "enabled": false,
+    "trial": false,
+    "max_hosei_rounds": 2,
+    "max_kessai_rounds": 1,
+    "skill_min_count": 2,
+    "skill_auto_execute": false,
+    "index_delete_ratio": 0.3
+  }
 }
