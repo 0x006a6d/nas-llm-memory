@@ -485,3 +485,10 @@ td .ubar { min-width: 160px; }
 .urow { display: flex; align-items: center; gap: 12px; padding: 3px 0; font-size: 12.5px; }
 .urow > span:first-child { flex: none; width: 44px; }
 .urow > span:last-child { flex: none; width: 64px; text-align: right; }
+
+/* 書架: 決裁欄(起案・審査・決裁・後閲の印箱) */
+.kessai-ran { display: flex; gap: 8px; margin: 10px 0 14px; flex-wrap: wrap; }
+.kessai-ran .kbox { border: 1px solid var(--hairline-strong); border-radius: 6px; min-width: 128px; padding: 7px 10px; text-align: center; }
+.kessai-ran .kbox .kr { font-size: 11px; opacity: .6; letter-spacing: .35em; }
+.kessai-ran .kbox .kv { font-size: 12px; margin-top: 4px; word-break: break-all; line-height: 1.5; }
+.kessai-ran .kbox.done { border-color: rgba(224, 164, 94, 0.55); }

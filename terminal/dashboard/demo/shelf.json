@@ -1,0 +1,72 @@
+{
+ "list": [
+  {"id": 3, "doc_no": "2026-0003", "fiscal_year": 2026, "seq": 3, "kind": "skill",
+   "project_key": "general", "title": "スキル「demo-restart-comfy」の登載について(伺い)",
+   "state": "approved", "decision_class": "bucho", "seen_state": "pending",
+   "created_at": "2026-07-27T03:05:00", "decided_at": "2026-07-27T03:06:00",
+   "executed_at": null, "related_doc": null},
+  {"id": 2, "doc_no": "2026-0002", "fiscal_year": 2026, "seq": 2, "kind": "index",
+   "project_key": "demo-project", "title": "プロジェクト demo-project の index 改定について(伺い)",
+   "state": "executed", "decision_class": "senketsu", "seen_state": "pending",
+   "created_at": "2026-07-27T03:04:00", "decided_at": "2026-07-27T03:04:10",
+   "executed_at": "2026-07-27T03:04:11", "related_doc": null},
+  {"id": 1, "doc_no": "2026-0001", "fiscal_year": 2026, "seq": 1, "kind": "fact",
+   "project_key": "demo-project", "title": "プロジェクト demo-project に係る事実の登載について(伺い)",
+   "state": "executed", "decision_class": "bucho", "seen_state": "seen",
+   "created_at": "2026-07-27T03:02:00", "decided_at": "2026-07-27T03:03:00",
+   "executed_at": "2026-07-27T03:03:05", "related_doc": null}
+ ],
+ "docs": {
+  "1": {
+   "id": 1, "doc_no": "2026-0001", "fiscal_year": 2026, "seq": 1, "kind": "fact",
+   "project_key": "demo-project", "title": "プロジェクト demo-project に係る事実の登載について(伺い)",
+   "proposal": "標記について、下記のとおり事実層(facts)に登載してよろしいか。\n\n記\n\n1. 新規登載 1件(別記第1)\n2. 既存事実の置換 1件(別記第2)\n\n別記第1(新規登載)\n 1. ビルドは make demo -j8 で通る\n\n別記第2(既存事実の置換)\n 1. [41を置換] デモ環境のポートは8199に変更された",
+   "payload": {"candidates": []},
+   "state": "executed", "decision_class": "bucho", "seen_state": "seen",
+   "created_at": "2026-07-27T03:02:00", "decided_at": "2026-07-27T03:03:00",
+   "executed_at": "2026-07-27T03:03:05", "related_doc": null,
+   "log": [
+    {"id": 1, "actor": "kian:claude-haiku-4-5-20251001", "action": "kian", "memo": null, "created_at": "2026-07-27T03:02:00", "created_by": "run-10"},
+    {"id": 2, "actor": "shinsa:claude-sonnet-5", "action": "joshin", "memo": "既存41と矛盾(置換上申)", "created_at": "2026-07-27T03:02:30", "created_by": "run-10"},
+    {"id": 3, "actor": "kessai:claude-opus-4-6", "action": "kessai_ok", "memo": null, "created_at": "2026-07-27T03:03:00", "created_by": "run-10"},
+    {"id": 4, "actor": "system", "action": "shiko", "memo": "facts登載2件 登載外0件", "created_at": "2026-07-27T03:03:05", "created_by": "run-10"},
+    {"id": 5, "actor": "human", "action": "kouetsu", "memo": null, "created_at": "2026-07-27T09:00:00", "created_by": "dashboard-20260727"}
+   ],
+   "facts": [
+    {"id": 101, "content": "ビルドは make demo -j8 で通る", "status": "verified", "retired": false, "superseded": false},
+    {"id": 102, "content": "デモ環境のポートは8199に変更された", "status": "verified", "retired": false, "superseded": false}
+   ],
+   "related": []
+  },
+  "2": {
+   "id": 2, "doc_no": "2026-0002", "fiscal_year": 2026, "seq": 2, "kind": "index",
+   "project_key": "demo-project", "title": "プロジェクト demo-project の index 改定について(伺い)",
+   "proposal": "標記について、下記のとおり index を改定してよろしいか。\n\n記\n\n1. 追加2行・削除1行(現行12行→改定案13行)\n2. 差分は別記第1のとおり\n\n別記第1(差分)\n--- 現行\n+++ 改定案\n-デモ環境のポートは8080\n+デモ環境のポートは8199に変更された\n+ビルドは make demo -j8 で通る",
+   "payload": {"added": 2, "deleted": 1},
+   "state": "executed", "decision_class": "senketsu", "seen_state": "pending",
+   "created_at": "2026-07-27T03:04:00", "decided_at": "2026-07-27T03:04:10",
+   "executed_at": "2026-07-27T03:04:11", "related_doc": null,
+   "log": [
+    {"id": 6, "actor": "enrich:claude-sonnet-5", "action": "kian", "memo": null, "created_at": "2026-07-27T03:04:00", "created_by": "run-10"},
+    {"id": 7, "actor": "shinsa:claude-sonnet-5", "action": "shinsa_ok", "memo": "既決factsの機械的帰結につき専決", "created_at": "2026-07-27T03:04:10", "created_by": "run-10"},
+    {"id": 8, "actor": "system", "action": "shiko", "memo": "index 13行を配布", "created_at": "2026-07-27T03:04:11", "created_by": "run-10"}
+   ],
+   "facts": [], "related": []
+  },
+  "3": {
+   "id": 3, "doc_no": "2026-0003", "fiscal_year": 2026, "seq": 3, "kind": "skill",
+   "project_key": "general", "title": "スキル「demo-restart-comfy」の登載について(伺い)",
+   "proposal": "標記について、下記のスキルを skills 本体に登載してよろしいか。\n\n記\n\n1. スキル「demo-restart-comfy」を skills 本体へ登載する(検出3回)\n2. SKILL.md案は別記第1のとおり\n3. 施行(全端末への配布)は人間の後閲印を条件とする\n\n別記第1(SKILL.md案)\n# ComfyUI再起動手順\n1. restart_comfy.sh を実行\n2. /system_stats が200になるまで待つ",
+   "payload": {"name": "demo-restart-comfy", "count": 3},
+   "state": "approved", "decision_class": "bucho", "seen_state": "pending",
+   "created_at": "2026-07-27T03:05:00", "decided_at": "2026-07-27T03:06:00",
+   "executed_at": null, "related_doc": null,
+   "log": [
+    {"id": 9, "actor": "skill-scout", "action": "kian", "memo": "検出3回", "created_at": "2026-07-27T03:05:00", "created_by": "run-10"},
+    {"id": 10, "actor": "shinsa:claude-sonnet-5", "action": "joshin", "memo": "既存スキルと重複なし・手順具体的", "created_at": "2026-07-27T03:05:30", "created_by": "run-10"},
+    {"id": 11, "actor": "kessai:claude-opus-4-6", "action": "kessai_ok", "memo": "登載可", "created_at": "2026-07-27T03:06:00", "created_by": "run-10"}
+   ],
+   "facts": [], "related": []
+  }
+ }
+}

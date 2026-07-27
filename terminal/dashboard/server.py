@@ -885,6 +885,7 @@ def nas_snapshot():
             "group by device, project_key, cwd) t "
             "where rn = 1 order by device, project_key"),
         "batch_config": nas_batch_config(),
+        "shelf_pending": shelf_pending_count(),
         "fetched_at": datetime.now().strftime("%m-%d %H:%M:%S"),
     }
     CACHE_DIR.mkdir(exist_ok=True)
@@ -977,6 +978,175 @@ def fact_op(op, project, content, fact_id):
     else:
         raise ValueError(f"unknown op: {op}")
     return run_sql(sql)
+
+
+# ---------------------------------------------------------------- 書架(起案・決裁文書)
+
+def shelf_list(filt, kind):
+    """drafts一覧。filt: pending(後閲待ち)|remanded(差し戻し中)|all。"""
+    if DEMO:
+        data = load_json(DEMO_DIR / "shelf.json", {})
+        rows = data.get("list", [])
+        if filt == "pending":
+            rows = [r for r in rows if r.get("seen_state") == "pending"]
+        elif filt == "remanded":
+            rows = [r for r in rows if r.get("seen_state") == "remanded"]
+        if kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        return rows
+    cond = "true"
+    if filt == "pending":
+        # 後閲対象 = 完結して人間がまだ見ていない文書(施行済み・廃案・後閲待ちskill)
+        cond = "seen_state = 'pending' and state in ('executed','rejected','approved')"
+    elif filt == "remanded":
+        cond = "seen_state = 'remanded' or state = 'reexamine'"
+    if kind:
+        cond = f"({cond}) and kind = {dollar_quote(kind)}"
+    return sql_json(
+        "select id, doc_no, fiscal_year, seq, kind, project_key, title, state, "
+        "decision_class, seen_state, created_at, decided_at, executed_at, related_doc "
+        f"from drafts where {cond} order by id desc limit 100")
+
+
+def shelf_doc(did):
+    """文書詳細: drafts行 + 回議録(draft_log) + 登載facts + 関連文書。"""
+    did = int(did)
+    if DEMO:
+        data = load_json(DEMO_DIR / "shelf.json", {})
+        doc = (data.get("docs") or {}).get(str(did))
+        if not doc:
+            raise ValueError(f"demo文書がありません: {did}")
+        return doc
+    rows = sql_json(f"select * from drafts where id = {did}")
+    if not rows:
+        raise ValueError(f"文書がありません: id={did}")
+    doc = rows[0]
+    doc["log"] = sql_json(
+        "select id, actor, action, memo, created_at, created_by "
+        f"from draft_log where draft_id = {did} order by id")
+    doc["facts"] = sql_json(
+        "select f.id, f.content, f.status, (f.retired_by is not null) retired, "
+        "exists(select 1 from facts g where g.replaces = f.id) superseded "
+        f"from draft_facts df join facts f on f.id = df.fact_id "
+        f"where df.draft_id = {did} order by f.id")
+    doc["related"] = sql_json(
+        "select id, doc_no, kind, title, state from drafts "
+        f"where related_doc = {did} or id = coalesce({doc.get('related_doc') or 'null'}, -1) "
+        "order by id")
+    return doc
+
+
+def shelf_op(op, draft_id, memo):
+    """後閲操作。kouetsu=後閲印 / remand=メモ付き差し戻し / approve_skill=skill施行許可。
+
+    差し戻しの意味論: executed文書→翌晩、決裁者が再審理(reexamine)。
+    approved(後閲待ちskill)→廃案。remandはメモ必須(前の担当者への指示)。
+    """
+    did = int(draft_id)
+    today = datetime.now().strftime("%Y%m%d")
+    by = dollar_quote(f"dashboard-{today}")
+    if op == "kouetsu":
+        sql = ("update drafts set seen_state='seen', seen_at=now() "
+               f"where id={did} and seen_state='pending' "
+               "and state in ('executed','rejected') returning id;")
+        action, log_memo = "kouetsu", memo or None
+    elif op == "remand":
+        if not (memo or "").strip():
+            raise ValueError("差し戻しにはメモ(前の担当者への指示)が必要です")
+        sql = ("update drafts set seen_state='remanded', seen_at=now(), "
+               "state = case when state='executed' then 'reexamine' "
+               "when state='approved' then 'rejected' else state end "
+               f"where id={did} and seen_state='pending' "
+               "and state in ('executed','approved') returning id;")
+        action, log_memo = "sashimodoshi", memo
+    elif op == "approve_skill":
+        # 後閲印=施行許可。翌晩のnightlyがskills/へ移して施行する
+        sql = ("update drafts set seen_state='seen', seen_at=now() "
+               f"where id={did} and seen_state='pending' and state='approved' "
+               "and kind='skill' returning id;")
+        action, log_memo = "kouetsu", memo or "後閲印(施行許可)"
+    else:
+        raise ValueError(f"unknown op: {op}")
+    if not run_sql(sql):
+        raise ConflictError("文書の状態が変わっています。再読込してください")
+    run_sql("insert into draft_log (draft_id, actor, action, memo, created_by) values "
+            f"({did}, 'human', {dollar_quote(action)}, "
+            f"{dollar_quote(log_memo) if log_memo else 'null'}, {by});")
+    return {"ok": True}
+
+
+def shelf_pending_count():
+    """後閲待ち文書数(概要タブの注意欄用)。012未適用ならNone。"""
+    try:
+        out = run_sql("select count(*) from drafts where seen_state='pending' "
+                      "and state in ('executed','rejected','approved');")
+        return int(out or 0)
+    except Exception:  # noqa: BLE001 — drafts未適用環境
+        return None
+
+
+# --------------------------------------------- 専決規程(batch/config.json)の編集
+
+BATCH_CONFIG_REMOTE = "/volume2/claude-system/batch/config.json"
+CONFIG_ROLES = ("kian", "shinsa", "kessai", "enrich")
+CONFIG_RINGI_TYPES = {
+    "enabled": bool, "trial": bool, "max_hosei_rounds": int, "max_kessai_rounds": int,
+    "skill_min_count": int, "skill_auto_execute": bool, "index_delete_ratio": (int, float),
+    "trial_models": list,
+}
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,100}$")
+
+
+def save_batch_config(body):
+    """rolesとringi(専決規程)を検証してNASのconfig.jsonへ書き戻す。
+
+    - 既存configを土台に上書きし、未知キー(将来の設定)は保持する
+    - 楽観ロック: bodyのexpected(画面が読んだ時点のconfig)と現物が違えば409
+    - 書き込み前に.bakへ退避(index.md編集と同型)。反映は翌晩のバッチから
+    """
+    if DEMO:
+        raise RuntimeError("demo モードでは保存できません")
+    current = nas_batch_config() or {}
+    if body.get("expected") is not None and body["expected"] != current:
+        raise ConflictError("NASのconfig.jsonが別の場所で更新されています。"
+                            "再読込してから保存し直してください")
+    new = dict(current)
+    if "model" in body:
+        m = str(body["model"] or "")
+        if m and not MODEL_RE.match(m):
+            raise ValueError(f"model名が不正です: {m}")
+        new["model"] = m
+    if "roles" in body:
+        roles = body["roles"]
+        if not isinstance(roles, dict) or set(roles) - set(CONFIG_ROLES):
+            raise ValueError(f"rolesのキーは {'/'.join(CONFIG_ROLES)} のみ")
+        for k, v in roles.items():
+            if not isinstance(v, str) or (v and not MODEL_RE.match(v)):
+                raise ValueError(f"roles.{k} のモデル名が不正です: {v!r}")
+        new["roles"] = {k: v for k, v in roles.items() if v}
+    if "ringi" in body:
+        ringi = body["ringi"]
+        if not isinstance(ringi, dict) or set(ringi) - set(CONFIG_RINGI_TYPES):
+            raise ValueError("ringiに未知のキーがあります")
+        merged = dict(current.get("ringi") or {})
+        for k, v in ringi.items():
+            t = CONFIG_RINGI_TYPES[k]
+            if (isinstance(v, bool) and t is not bool) or not isinstance(v, t):
+                raise ValueError(f"ringi.{k} の型が不正です: {v!r}")
+            if k == "trial_models" and not all(
+                    isinstance(x, str) and MODEL_RE.match(x) for x in v):
+                raise ValueError("ringi.trial_models のモデル名が不正です")
+            merged[k] = v
+        new["ringi"] = merged
+    text = json.dumps(new, ensure_ascii=False, indent=1) + "\n"
+    proc = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", SSH_TARGET,
+         f"cp {BATCH_CONFIG_REMOTE} {BATCH_CONFIG_REMOTE}.bak 2>/dev/null; "
+         f"cat > {BATCH_CONFIG_REMOTE}"],
+        input=text.encode(), capture_output=True, timeout=15)
+    if proc.returncode != 0:
+        raise RuntimeError(f"書き込み失敗: {proc.stderr.decode(errors='replace')[-300:]}")
+    return {"saved": True, "config": new}
 
 
 # ---------------------------------------------------------------- save files
@@ -1169,6 +1339,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(list_flags())
             elif url.path == "/api/messages":
                 self.send_json(list_messages())
+            elif url.path == "/api/shelf":
+                self.send_json(shelf_list(q.get("filter", ["pending"])[0],
+                                          q.get("kind", [""])[0]))
+            elif url.path == "/api/shelf_doc":
+                self.send_json(shelf_doc(q["id"][0]))
             elif url.path == "/api/usage":
                 self.send_json(usage_snapshot(q.get("hours", ["168"])[0]))
             else:
@@ -1215,6 +1390,11 @@ class Handler(BaseHTTPRequestHandler):
                 out = flag_op(body.get("op"), body.get("session_id"),
                               body.get("note", ""))
                 self.send_json({"result": out})
+            elif self.path == "/api/shelf_op":
+                self.send_json(shelf_op(body.get("op"), body.get("id"),
+                                        body.get("memo", "")))
+            elif self.path == "/api/batch_config":
+                self.send_json(save_batch_config(body))
             else:
                 self.send_error(404)
         except ConflictError as e:
