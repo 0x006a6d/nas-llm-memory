@@ -13,6 +13,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+# nightly.py が import ringi するため、単体実行でもbatchディレクトリを見えるようにする
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "nas" / "batch"))
+
 NIGHTLY_PATH = Path(__file__).resolve().parent.parent / "nas" / "batch" / "nightly.py"
 
 _seq = 0

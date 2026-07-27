@@ -12,6 +12,7 @@
   "ringi": {
     "enabled": false,
     "trial": false,
+    "trial_models": ["claude-haiku-4-5-20251001", "claude-sonnet-5"],
     "max_hosei_rounds": 2,
     "max_kessai_rounds": 1,
     "skill_min_count": 2,

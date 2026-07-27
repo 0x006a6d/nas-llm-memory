@@ -17,6 +17,7 @@ import json
 RINGI_DEFAULTS = {
     "enabled": False,            # falsyなら従来パイプラインのまま(移行スイッチ)
     "trial": False,              # 第1期試行(起案モデルの並行比較)
+    "trial_models": ["claude-haiku-4-5-20251001", "claude-sonnet-5"],  # 試行する起案候補
     "max_hosei_rounds": 2,       # 審査→起案者の補正往復の上限。超過は廃案
     "max_kessai_rounds": 1,      # 決裁→審査の差し戻し往復の上限。超過は廃案
     "skill_min_count": 2,        # skills-candidates を起票する検出回数の下限
