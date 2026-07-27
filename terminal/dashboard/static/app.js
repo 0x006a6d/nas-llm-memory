@@ -21,6 +21,7 @@ const TABS = {
   context: "コンテキスト",
   routing: "配布",
   messages: "申し送り",
+  usage: "使用量",
 };
 
 async function j(url, opts) {
@@ -255,9 +256,12 @@ function keyToIndexDir(key) {
 function deviceOf(key) {
   if (key.includes("/") || key === "general") return null;
   const list = N.devices_by_project || [];
-  // 文脈により munged 形(先頭の'-'が落ちた形)でも来るので両方照合する
+  // 文脈により munged 形(先頭の'-'が落ちた形)でも来るので両方照合する。
+  // index ディレクトリ名は munged+末尾ハッシュ(github.com-…-bloclist-fe6ac891)の
+  // 形でも来るため、実キーの munged 形を前方一致で照合するフォールバックを持つ
   const hit = list.find((d) => d.project_key === key) ||
-    list.find((d) => d.project_key === `-${key}`);
+    list.find((d) => d.project_key === `-${key}`) ||
+    list.find((d) => key.startsWith(keyToIndexDir(d.project_key)));
   return hit ? hit.device : null;
 }
 
@@ -303,6 +307,38 @@ function attachLineNumbers(ta, gutter) {
   update();
 }
 
+/* Codex への index 配布物の状態表(コンテキストタブ)。Codex には @include 構文が
+   無いため、agents_sync.py(sender 実行時)が index をファイルに直接展開する。 */
+function codexAgentsHtml() {
+  const C = S.codex_agents;
+  if (!C) return "";
+  const cell = (st, needManaged) => {
+    if (!st) return '<span class="chip err">なし</span>';
+    const chips = needManaged
+      ? (st.managed ? '<span class="chip ok">管理セクションあり</span>'
+                    : '<span class="chip warn">管理セクションなし(未展開)</span>')
+      : "";
+    return `${chips} <span class="mono">${kb(st.bytes)}</span> <span class="mono faint">更新 ${esc(st.mtime)}</span>`;
+  };
+  const g = C.global;
+  return `
+    <h2 class="section">Codex 側配布(AGENTS.md 管理セクション / AGENTS.override.md)</h2>
+    <div class="note info"><span class="tag">仕組み</span><span>Codex には @include 構文が無いため、hooks/agents_sync.py(sender 実行時 = SessionStart+毎時)が記憶 index をファイルに直接展開して配布します。グローバルは ~/.codex/AGENTS.md のマーカー区切り管理セクション、プロジェクトは「手書き AGENTS.md 全文 + そのプロジェクトの index」を結合した AGENTS.override.md(git 追跡外)。ここは生成状態の確認のみで、編集は手書き AGENTS.md か「記憶 (facts)」へ。プロジェクトの登録は <span class="mono">agents_sync.py register</span>(一覧: ${esc(C.registry_path)})。</span></div>
+    <div class="card"><table>
+      <tr><th>対象</th><th>手書き AGENTS.md</th><th>配布物</th></tr>
+      <tr>
+        <td class="mono">グローバル ~/.codex/AGENTS.md</td>
+        <td class="faint">(同一ファイル内・管理セクション外)</td>
+        <td>${cell(g, true)}</td>
+      </tr>
+      ${C.projects.map((p) => `<tr>
+        <td class="mono">${esc(p.dir)}</td>
+        <td>${p.agents ? `<span class="mono">${kb(p.agents.bytes)}</span>` : '<span class="chip warn">なし</span>'}</td>
+        <td>${p.override ? `<span class="chip ok">AGENTS.override.md</span> ${cell(p.override, false)}` : '<span class="chip err">未生成</span>'}</td>
+      </tr>`).join("")}
+    </table></div>`;
+}
+
 function renderContext(el) {
   const files = [
     { key: "CLAUDE.md", target: null, bytes: S.claude_md.bytes,
@@ -315,24 +351,43 @@ function renderContext(el) {
   ];
   el.innerHTML = `
     <div class="note warn"><span class="tag">前提</span><span>index.md は夜間バッチ(03:00)が current_facts から全再生成します。ここでの直接編集は即座に反映されますが翌バッチで上書きされます。恒久的に直したい内容は「記憶 (facts)」タブで facts を修正してください。</span></div>
-    <div class="note info"><span class="tag">凡例</span><span>一覧は claude-config/memory/ 配下の全端末・全プロジェクト分。セッションに注入されるのは general(全端末・毎セッション)と、routing.json で宣言された端末×プロジェクトの index(そのプロジェクトで開いたセッションのみ)。<span class="chip amber">auto</span> = 夜間バッチが再生成するファイル。<span class="devtag">端末名</span> = そのプロジェクトを主に使っている端末(会話履歴 turns からの推定)。</span></div>
+    <div class="note info"><span class="tag">凡例</span><span>一覧は claude-config/memory/ 配下の全端末・全プロジェクト分の実ファイルで、<b>全部が読み込まれるわけではありません</b>。1セッションに注入されるのは「CLAUDE.md + general」と、そのプロジェクトで開いたときのそのプロジェクトの index 1本だけ(routing 宣言に従う)。<span class="chip amber">auto</span> = 夜間バッチが再生成するファイル。<span class="devtag">端末名</span> = そのプロジェクトを主に使っている端末(会話履歴 turns からの推定)。</span></div>
     <div class="split" style="margin-top:14px">
       <div class="card filelist" id="ctxList"></div>
       <div class="card" id="ctxEditor"></div>
-    </div>`;
+    </div>
+    ${codexAgentsHtml()}`;
 
   const list = $("#ctxList", el);
   const editor = $("#ctxEditor", el);
   let sel = files.find((f) => f.key === "general") || files[0];
 
   function drawList() {
-    list.innerHTML = files.map((f) => `
+    // 「このセッションに入るか」で分ける: 毎セッション注入(CLAUDE.md+general) /
+    // この端末のプロジェクト(開いたときだけ注入) / 他端末(この端末には注入されない)
+    const localDev = (S.routing || {}).local_device;
+    const groups = [
+      { label: "毎セッション注入(この端末の全セッション)", items: [] },
+      { label: `この端末(${localDev})のプロジェクト — 開いたときだけ注入`, items: [] },
+      { label: "他端末のプロジェクト — この端末には注入されない", items: [] },
+      { label: "帰属不明(turns 実績なし)", items: [] },
+    ];
+    for (const f of files) {
+      if (f.key === "CLAUDE.md" || f.key === "general") groups[0].items.push(f);
+      else {
+        const dev = deviceOf(f.key);
+        groups[dev === localDev ? 1 : dev ? 2 : 3].items.push(f);
+      }
+    }
+    const btn = (f) => `
       <button class="${f === sel ? "sel" : ""}" data-k="${esc(f.key)}">
         <span>${keyLabel(f.key)}${f.auto ? ' <span class="chip amber" title="夜間バッチ生成">auto</span>' : ""}</span>
         <span class="kb">${kb(f.bytes)}</span>
-      </button>`).join("");
-    list.querySelectorAll("button").forEach((b, i) => {
-      b.onclick = () => { sel = files[i]; drawList(); drawEditor(); };
+      </button>`;
+    list.innerHTML = groups.filter((g) => g.items.length).map((g) =>
+      `<div class="grp">${esc(g.label)}</div>${g.items.map(btn).join("")}`).join("");
+    list.querySelectorAll("button").forEach((b) => {
+      b.onclick = () => { sel = files.find((f) => f.key === b.dataset.k); drawList(); drawEditor(); };
     });
   }
 
@@ -452,9 +507,11 @@ function renderFacts(el) {
           <span class="chip ${f.status === "verified" ? "ok" : "warn"}" title="fact の検証状態。verified = 事実として確定。それ以外はバッチが自動抽出した未確定情報">${esc(f.status)}</span>
           <span class="fact-id">${esc(String(f.created_at || "").slice(0, 10))}<br>${esc(f.created_by || "")}</span>
         </div>
-        <div class="editor-gutter fact-gutter" aria-hidden="true"></div>
-        <div class="fact-body" contenteditable="plaintext-only" spellcheck="false"
-             title="クリックしてそのまま編集できます。変えると保存/取消が出ます(保存 = 旧 fact を置き換える新 fact を作成。系譜は replaces 列に残る)">${esc(f.content)}</div>
+        <div class="fact-field">
+          <div class="editor-gutter fact-gutter" aria-hidden="true"></div>
+          <div class="fact-body" contenteditable="plaintext-only" spellcheck="false"
+               title="クリックしてそのまま編集できます。変えると保存/取消が出ます(保存 = 旧 fact を置き換える新 fact を作成。系譜は replaces 列に残る)">${esc(f.content)}</div>
+        </div>
         <div class="fact-actions">
           <button class="btn mini ok-save" hidden title="Cmd+Enter でも保存">保存(置換)</button>
           <button class="btn mini ghost ok-cancel" hidden title="Esc でも取消">取消</button>
@@ -666,6 +723,9 @@ function renderSkills(el) {
     else if (src === "codex") label = "codex — ~/.codex/skills(Codex 専用)";
     else if (src.startsWith("project:")) label = `project — ${src.slice(8)}/.claude`;
     else if (src.startsWith("plugin:")) label = `plugin — ${src.slice(7)}`;
+    else if (src === "codex-builtin") label = "Codex 内蔵プラグイン — ~/.codex/plugins/cache/openai-bundled(CLI 同梱)";
+    else if (src === "codex-runtime") label = "Codex 実行時ランタイム — ~/.codex/plugins/cache/openai-primary-runtime(実行時に取得・組み立て)";
+    else if (src === "codex-remote") label = "Codex リモートプラグイン — ~/.codex/plugins/cache/openai-curated-remote";
     chips += first.editable
       ? ' <span class="chip ok">編集可(ファイル直接編集)</span>'
       : ' <span class="chip warn">編集不可(プラグイン配布物・更新で上書き)</span>';
@@ -1032,8 +1092,8 @@ function renderMessages(el) {
   const keys = [...new Set(dps.map((d) => d.project_key))].sort();
   el.innerHTML = `
     <div class="note info"><span class="tag">仕組み</span><span>宛先に合致する「次のセッション」の開始時に一度だけ表示され、既読になります。恒久的に残したい内容はここではなく「記憶 (facts)」へ。</span></div>
-    <h2 class="section">送信</h2>
-    <div class="card">
+    <div class="ugrid">
+    <div class="card upanel"><h2 class="section">送信</h2>
       <div class="toolrow">
         <select id="msgDev"><option value="">端末: 指定なし</option>
           ${devices.map((d) => `<option>${esc(d)}</option>`).join("")}</select>
@@ -1045,8 +1105,8 @@ function renderMessages(el) {
         <button class="btn mini" id="msgSend">送信</button>
       </div>
     </div>
-    <h2 class="section">履歴(直近30件)</h2>
-    <div class="card" id="msgList">読み込み中…</div>`;
+    <div class="card upanel"><h2 class="section">履歴(直近30件)</h2><div id="msgList">読み込み中…</div></div>
+    </div>`;
 
   async function loadList() {
     const box = $("#msgList", el);
@@ -1081,11 +1141,82 @@ function renderMessages(el) {
   loadList();
 }
 
+function renderUsage(el) {
+  const hours = renderUsage._hours || 168;
+  const ranges = [[24, "24時間"], [168, "7日"], [720, "30日"]];
+  el.innerHTML = `
+    <div class="note info"><span class="tag">出所</span><span>各端末の Claude Code が OTLP で NAS の otel-collector に送るテレメトリ(Prometheus 保持 400日)。詳細は <a id="grafanaLink" href="#" target="_blank">Grafana</a>。</span></div>
+    <div class="toolrow rangebtns" style="margin-top:14px">
+      ${ranges.map(([h, l]) => `<button class="btn mini${h === hours ? "" : " ghost"}" data-hours="${h}">${l}</button>`).join("")}
+      <span class="stamp" id="usageStamp"></span>
+    </div>
+    <div id="usageBody" style="margin-top:16px"><span class="faint">読み込み中…</span></div>`;
+
+  el.querySelectorAll(".rangebtns .btn").forEach((b) => {
+    b.onclick = () => { renderUsage._hours = Number(b.dataset.hours); renderUsage(el); };
+  });
+
+  const money = (v) => `$${Number(v ?? 0).toFixed(2)}`;
+  const bar = (v, max) =>
+    `<div class="ubar"><i style="width:${v > 0 && max > 0 ? Math.max(1, v / max * 100) : 0}%"></i></div>`;
+  const panel = (title, inner) =>
+    `<div class="card upanel"><h2 class="section">${title}</h2>${inner}</div>`;
+  const breakdown = (title, rows, label) => {
+    const maxCost = Math.max(...rows.map((r) => r.cost_usd), 0);
+    return panel(title, rows.length ? `<table>
+      <tr><th></th><th class="num">コスト</th><th></th><th class="num">トークン</th></tr>
+      ${rows.map((r) => `<tr>
+        <td class="mono">${esc(r[label])}</td>
+        <td class="num mono">${money(r.cost_usd)}</td>
+        <td>${bar(r.cost_usd, maxCost)}</td>
+        <td class="num mono faint">${num(r.tokens)}</td>
+      </tr>`).join("")}</table>` : '<span class="faint">期間内のデータがありません。</span>');
+  };
+
+  (async () => {
+    const box = $("#usageBody", el);
+    let U;
+    try { U = await j(`/api/usage?hours=${hours}`); }
+    catch (e) {
+      box.innerHTML = `<div class="note warn"><span class="tag">取得失敗</span><span>${esc(e.message)} — NAS の Prometheus(9090)に届いているか確認してください。</span></div>`;
+      return;
+    }
+    $("#grafanaLink", el).href = U.grafana;
+    $("#usageStamp", el).textContent = `取得 ${U.fetched_at}`;
+    const t = U.totals;
+    const maxDay = Math.max(...U.daily.map((d) => d.cost_usd), 0);
+    const maxTok = Math.max(...U.by_type.map((x) => x.tokens), 0);
+    box.innerHTML = `
+      <div class="stats">
+        <div class="stat card"><div class="n">${money(t.cost_usd)}</div><div class="l">コスト</div></div>
+        <div class="stat card"><div class="n">${num(t.tokens)}</div><div class="l">トークン</div></div>
+        <div class="stat card"><div class="n">${num(t.sessions)}</div><div class="l">セッション</div></div>
+        <div class="stat card"><div class="n">${(t.active_seconds / 3600).toFixed(1)}<small>h</small></div><div class="l">アクティブ時間</div></div>
+      </div>
+      <div class="ugrid">
+      ${U.daily.length ? panel("日別コスト",
+        U.daily.map((d) => `<div class="urow">
+          <span class="mono faint">${esc(d.date)}</span>
+          ${bar(d.cost_usd, maxDay)}
+          <span class="mono">${money(d.cost_usd)}</span>
+        </div>`).join("")) : ""}
+      ${breakdown("端末別", U.by_host, "host")}
+      ${breakdown("モデル別", U.by_model, "model")}
+      ${panel("トークン種別", U.by_type.length ? `<table>
+        <tr><th></th><th class="num">トークン</th><th></th></tr>
+        ${U.by_type.map((r) => `<tr><td class="mono">${esc(r.type)}</td>
+            <td class="num mono">${num(r.tokens)}</td>
+            <td>${bar(r.tokens, maxTok)}</td></tr>`).join("")}</table>`
+        : '<span class="faint">期間内のデータがありません。</span>')}
+      </div>`;
+  })();
+}
+
 /* ---------------- router ---------------- */
 
 const RENDER = { overview: renderOverview, context: renderContext, facts: renderFacts,
   skills: renderSkills, hooks: renderHooks, routing: renderRouting,
-  messages: renderMessages, collect: renderCollect };
+  messages: renderMessages, collect: renderCollect, usage: renderUsage };
 
 function route() {
   const tab = (location.hash || "#overview").slice(1);

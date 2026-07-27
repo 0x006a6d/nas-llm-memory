@@ -1,0 +1,251 @@
+/* theme.css — 白ベースを既定にし、ダークは html[data-theme="dark"] で切替。
+   style.css の後に読み込むこと。既存の style.css は書き換えない(上書き専用レイヤー)。 */
+
+:root {
+  /* ---- light (既定) ---- */
+  --bg: var(--base-bg);
+  --bg-deep: var(--base-deep);
+  --rail-bg: var(--base-rail);
+  --panel: #ffffff;
+  --panel-solid: #ffffff;
+  --hole: #ffffff;
+  --sunken: var(--base-sunken);
+  --track: var(--base-track);
+  --hairline: rgba(0, 0, 0, 0.09);
+  --hairline-strong: rgba(0, 0, 0, 0.14);
+  --text: #26241f;
+  --muted: #7a7264;
+  --faint: #a29a8c;
+  --amber: var(--accent);
+  --amber-dim: color-mix(in oklab, var(--accent) 12%, transparent);
+  --on-amber: #ffffff;
+  --blue: #3f5f8f;
+  --sage: #2f6d4a;
+  --mauve: #7a5580;
+  --slate: #8b8375;
+  --ok: #2f6d4a;
+  --warn: #8f5a12;
+  --err: #a04444;
+  --note-warn-bg: #faf1e3;
+  --note-warn-fg: #8a5a20;
+  --note-info-bg: #eef2f7;
+  --note-info-fg: #516079;
+  --topbar-bg: color-mix(in srgb, var(--base-bg) 78%, transparent);
+  --nav-active-bg: #ffffff;
+  --nav-hover-bg: rgba(0, 0, 0, 0.04);
+  --shell-tint: none;
+  --glow: none;
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+
+  /* ライトの地の色(白の温度)。クリーム既定 */
+  --base-bg: #faf8f4;
+  --base-deep: #f5f3ef;
+  --base-rail: #efece6;
+  --base-sunken: #f3f0ea;
+  --base-track: #ece7de;
+
+  /* アクセント色。ここ2行を差し替えれば全体に効く
+     ライト = インディゴ / ダーク = スレートブルー */
+  --accent: #4a5aa8;
+  --accent-dark: #6fa8dc;
+
+  /* 横幅可変時の見た目安定: 背景は全幅、中身の最大幅(100% = 常に全幅) */
+  --maxw: 100%;
+  --gutter: 40px;
+
+  /* auto チップ・端末名タグ等の琥珀。アクセント(--amber エイリアス)から独立させ元のオレンジを保つ */
+  --chip-amber: #a06a1c;
+}
+
+html[data-theme="dark"] {
+  --bg: #15171c;
+  --bg-deep: #101216;
+  --rail-bg: rgba(255, 255, 255, 0.02);
+  --panel: rgba(255, 255, 255, 0.045);
+  --panel-solid: #1c1f26;
+  --hole: #15171c;
+  --sunken: rgba(0, 0, 0, 0.3);
+  --track: rgba(255, 255, 255, 0.06);
+  --hairline: rgba(255, 255, 255, 0.08);
+  --hairline-strong: rgba(255, 255, 255, 0.14);
+  --text: #e7e9ee;
+  --muted: #979eae;
+  --faint: #6b7280;
+  --amber: var(--accent-dark);
+  --amber-dim: color-mix(in oklab, var(--accent-dark) 16%, transparent);
+  --on-amber: #101216;
+  --blue: #7d9cc9;
+  --sage: #8fb78e;
+  --mauve: #b08cae;
+  --slate: #67707f;
+  --ok: #7fb78e;
+  --warn: #d9974f;
+  --err: #c97e7e;
+  --note-warn-bg: rgba(217, 151, 79, 0.1);
+  --note-warn-fg: #e6c9a3;
+  --note-info-bg: rgba(125, 156, 201, 0.1);
+  --note-info-fg: #b9c8de;
+  --topbar-bg: rgba(21, 23, 28, 0.6);
+  --nav-active-bg: #2a2f3a;
+  --nav-hover-bg: rgba(255, 255, 255, 0.04);
+  --shell-tint: radial-gradient(1200px 600px at 85% -10%, color-mix(in oklab, var(--accent-dark) 6%, transparent), transparent 60%);
+  --glow: 0 0 12px color-mix(in oklab, var(--accent-dark) 45%, transparent);
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --chip-amber: #e0a45e;
+}
+
+html { color-scheme: light; }
+html[data-theme="dark"] { color-scheme: dark; }
+
+/* ---- style.css 内のハードコード色をトークン化 ---- */
+body { background: var(--shell-tint), linear-gradient(var(--bg), var(--bg-deep)); }
+
+.rail { background: var(--rail-bg); }
+.rail-mark { box-shadow: var(--glow); }
+
+#nav a:hover { background: var(--nav-hover-bg); }
+#nav a.active { background: var(--nav-active-bg); box-shadow: var(--card-shadow); }
+
+.topbar { background: var(--topbar-bg); }
+
+.card { border-top-color: var(--hairline); }
+html[data-theme="dark"] .card { border-top-color: var(--hairline-strong); }
+
+.donut .hole { background: var(--hole); }
+
+.budget-bar { background: var(--sunken); }
+.budget-seg { box-shadow: none; }
+html[data-theme="dark"] .budget-seg { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28); }
+
+.stat-strip { border-top-color: var(--hairline); background: var(--panel); }
+html[data-theme="dark"] .stat-strip { border-top-color: var(--hairline-strong); background: transparent; }
+
+.note.warn { background: var(--note-warn-bg); color: var(--note-warn-fg); }
+.note.info { background: var(--note-info-bg); color: var(--note-info-fg); }
+
+code.block { background: var(--sunken); color: var(--text); }
+
+.chip.amber { color: var(--chip-amber); border-color: color-mix(in oklab, var(--chip-amber) 45%, transparent); background: color-mix(in oklab, var(--chip-amber) 10%, transparent); }
+.chip.ok { border-color: rgba(79, 145, 102, 0.4); }
+.chip.warn { border-color: rgba(168, 112, 30, 0.4); }
+.chip.err { border-color: rgba(178, 90, 90, 0.45); background: rgba(178, 90, 90, 0.08); }
+.chip.blue { border-color: rgba(138, 151, 171, 0.45); }
+.chip.sel { color: var(--on-amber); }
+html[data-theme="dark"] .chip.err { border-color: rgba(201, 126, 126, 0.5); }
+
+.btn { color: var(--on-amber); }
+.btn.danger { border-color: rgba(178, 90, 90, 0.45); }
+
+input[type="text"], textarea, select { background: var(--panel-solid); }
+.lnfield { background: var(--panel-solid); }
+.lnfield input[type="text"] { background: transparent; }
+.fact-field { background: var(--panel-solid); }
+
+.filelist button:hover { background: var(--nav-hover-bg); }
+.filelist button.sel { background: var(--sunken); }
+
+/* ゲージ: グラデをやめて単色。目盛りは控えめに */
+.gauge, .ubar { background: var(--sunken); }
+.gauge .fill, .ubar i { background: var(--amber); }
+.gauge .mark { background: var(--hairline-strong); }
+
+.injected { color: var(--text); }
+
+.toast { background: var(--panel-solid); box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.35); }
+html[data-theme="dark"] .toast { background: rgba(28, 31, 38, 0.85); }
+
+.pipeline .pstage { background: var(--panel); }
+
+.fact-body[contenteditable]:hover { background: var(--nav-hover-bg); }
+.fact-body[contenteditable]:focus { background: var(--amber-dim); }
+
+.devtag { color: var(--chip-amber); border-color: color-mix(in oklab, var(--chip-amber) 40%, transparent); }
+
+/* ---- ライトでの意味色・チップ調整
+   白地ではダーク前提の淡い色が浮くので、文字色を深くし、
+   枠と地に同色の薄いティントを入れてバッジとして読めるようにする ---- */
+html:not([data-theme="dark"]) .chip {
+  color: var(--muted);
+  border-color: rgba(0, 0, 0, 0.16);
+  background: rgba(0, 0, 0, 0.025);
+}
+
+html:not([data-theme="dark"]) .chip.blue {
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 38%, transparent);
+  background: color-mix(in oklab, var(--accent) 8%, transparent);
+}
+
+/* auto チップは琥珀を維持(2026-07-26 の決定。インディゴ統一はしない) */
+html:not([data-theme="dark"]) .chip.amber {
+  color: var(--chip-amber);
+  border-color: color-mix(in oklab, var(--chip-amber) 38%, transparent);
+  background: color-mix(in oklab, var(--chip-amber) 8%, transparent);
+}
+
+html:not([data-theme="dark"]) .chip.ok {
+  color: var(--ok);
+  border-color: color-mix(in oklab, var(--ok) 38%, transparent);
+  background: color-mix(in oklab, var(--ok) 8%, transparent);
+}
+
+html:not([data-theme="dark"]) .chip.warn {
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn) 38%, transparent);
+  background: color-mix(in oklab, var(--warn) 8%, transparent);
+}
+
+html:not([data-theme="dark"]) .chip.err {
+  color: var(--err);
+  border-color: color-mix(in oklab, var(--err) 40%, transparent);
+  background: color-mix(in oklab, var(--err) 8%, transparent);
+}
+
+html:not([data-theme="dark"]) .chip.sel {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 端末タグも琥珀を維持(2026-07-26 の決定)。地だけ薄ティントで白地に馴染ませる */
+html:not([data-theme="dark"]) .devtag {
+  color: var(--chip-amber);
+  border-color: color-mix(in oklab, var(--chip-amber) 34%, transparent);
+  background: color-mix(in oklab, var(--chip-amber) 6%, transparent);
+}
+
+/* 淡すぎる見出し・補助文字のコントラストを少し上げる */
+html:not([data-theme="dark"]) th,
+html:not([data-theme="dark"]) .faint { color: #8b8375; }
+html:not([data-theme="dark"]) .sync-off { color: #a8a094; }
+
+/* ---- 横幅可変時のレイアウト: 背景は全幅・中身は最大幅で中央寄せ ---- */
+.topbar {
+  gap: 16px;
+  padding-inline: max(var(--gutter), calc((100% - var(--maxw)) / 2));
+}
+
+.content {
+  padding-inline: max(var(--gutter), calc((100% - var(--maxw)) / 2));
+}
+
+@media (max-width: 700px) { :root { --gutter: 20px; } }
+
+/* ---- テーマ切替ボタン(theme.js が生成) ---- */
+.theme-toggle {
+  font: 600 12px/1 system-ui, sans-serif;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 8px;
+  padding: 8px 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 140ms var(--ease), border-color 140ms var(--ease);
+}
+
+.theme-toggle:hover { color: var(--text); }
+.theme-toggle:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+.theme-toggle .ic { font-size: 13px; line-height: 1; }

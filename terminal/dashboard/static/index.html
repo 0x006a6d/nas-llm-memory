@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>記憶統合 — 設定と中身</title>
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
 <div class="frame">
@@ -25,6 +26,7 @@
       <a href="#context" data-tab="context" title="配布物: セッションに注入される index の中身">コンテキスト</a>
       <a href="#routing" data-tab="routing" title="配布段: どの端末にどのプロジェクトの index を注入するか">配布</a>
       <a href="#messages" data-tab="messages" title="一度きりの申し送り(次セッションで表示されて終わり)">申し送り</a>
+      <a href="#usage" data-tab="usage" title="Claude Code の使用量(各端末→OTLP→NAS Prometheus のテレメトリ集計)">使用量</a>
     </nav>
     <div class="rail-foot" id="railFoot"></div>
   </aside>
@@ -42,5 +44,6 @@
 </div>
 <div id="toast" class="toast" hidden></div>
 <script src="/static/app.js"></script>
+<script src="/static/theme.js"></script>
 </body>
 </html>

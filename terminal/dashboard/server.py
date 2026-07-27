@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import time
 import urllib.parse
+import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -339,6 +340,26 @@ def collect_skills():
                           f"plugin:{pr['plugin']}@{pr['marketplace']}",
                           editable=False, enabled=pr["enabled"])
             e["name"] = f"{pr['plugin']}:{e['name']}"  # /context の表示規則に合わせる
+            skills.append(e)
+
+    # Codex 側プラグイン(~/.codex/plugins/cache)の3層。openai-bundled = CLI 同梱の内蔵、
+    # openai-primary-runtime = 実行時に取得・組み立てられるランタイム、
+    # openai-curated-remote = リモート配布のプラグイン。
+    # 同一プラグインの旧バージョンが cache に残るため、バージョン昇順で走査して最後(最新)を採る
+    codex_cache = Path.home() / ".codex" / "plugins" / "cache"
+    for tier_dir, src in (("openai-bundled", "codex-builtin"),
+                          ("openai-primary-runtime", "codex-runtime"),
+                          ("openai-curated-remote", "codex-remote")):
+        picked = {}
+        for f in sorted(codex_cache.glob(f"{tier_dir}/*/*/skills/*/SKILL.md")):
+            picked[(f.parents[3].name, f.parent.name)] = f  # (plugin, skill名)
+        for (plugin, _name), f in sorted(picked.items()):
+            real = str(f.resolve())
+            if real in seen:
+                continue
+            seen.add(real)
+            e = _md_entry(f, f.parent.name, src, editable=False)
+            e["name"] = f"{plugin}:{e['name']}"
             skills.append(e)
 
     usage = skill_usage()  # {agent: {呼び出し名: {count,last}}}
@@ -744,6 +765,33 @@ def list_messages():
         "created_at, read_at from messages order by id desc limit 30")
 
 
+def codex_agents_state():
+    """Codex への index 配布物の生成状態(コンテキストタブ表示用)。
+
+    agents_sync.py が sender 実行時に生成する ~/.codex/AGENTS.md の管理セクションと、
+    登録プロジェクト(~/.claude-spool/codex-projects.json)の AGENTS.override.md を確認する。
+    """
+    marker = "<!-- nas-memory:begin"
+
+    def stat(p):
+        if not p.is_file():
+            return None
+        text = read_text(p) or ""
+        return {"path": str(p), "bytes": len(text.encode()),
+                "managed": marker in text,
+                "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d %H:%M")}
+
+    reg = load_json(HOME / ".claude-spool" / "codex-projects.json", [])
+    return {
+        "global": stat(HOME / ".codex" / "AGENTS.md"),
+        "registry_path": str(HOME / ".claude-spool" / "codex-projects.json"),
+        "projects": [{"dir": p,
+                      "agents": stat(Path(p) / "AGENTS.md"),
+                      "override": stat(Path(p) / "AGENTS.override.md")}
+                     for p in reg if isinstance(p, str)],
+    }
+
+
 def git_info():
     def g(*args):
         p = subprocess.run(["git", "-C", str(CONFIG_DIR), *args],
@@ -778,6 +826,7 @@ def state():
         "hook_scripts": sorted(p.name for p in (CONFIG_DIR / "hooks").glob("*.py")),
         "git": git_info(),
         "routing": routing_state(),
+        "codex_agents": codex_agents_state(),
         "skill_candidates": skill_candidates(),
         "vibe_island_present": (HOME / ".vibe-island/bin/vibe-island-bridge").exists(),
         "generated_at": datetime.now().strftime("%H:%M:%S"),
@@ -955,6 +1004,110 @@ def save_file(target, content):
     return {"path": str(path), "bytes": len(content.encode()), "backup": str(bak)}
 
 
+# ---------------------------------------------------------------- 使用量(Claude Code telemetry)
+# 各端末の Claude Code が OTLP で NAS の otel-collector に送るメトリクスを
+# Prometheus(NAS:9090)の HTTP API で集計する。ホストは ingest_url から導出し、
+# コードに IP を書かない。
+
+def _nas_host():
+    cfg = load_json(HOME / ".claude-spool" / "config.json", {})
+    host = urllib.parse.urlsplit(str(cfg.get("ingest_url") or "")).hostname
+    if not host:
+        raise RuntimeError("~/.claude-spool/config.json の ingest_url から NAS ホストを特定できません")
+    return host
+
+
+def _prom_query(base, expr, at=None):
+    params = {"query": expr}
+    if at is not None:
+        params["time"] = str(at)
+    url = f"{base}/api/v1/query?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=10) as r:
+        data = json.load(r)
+    if data.get("status") != "success":
+        raise RuntimeError(f"Prometheus 応答異常: {str(data)[:300]}")
+    return data["data"]["result"]
+
+
+def usage_snapshot(hours):
+    """期間内の Claude Code 使用量。
+
+    メトリクスはセッションごとに新系列になり、短命セッションでは全量が系列の
+    初期値に入るため increase() では数え漏れる。カウンタは単調増加なので
+    「セッション単位の max_over_time を合算」で期間合計を出す(期間境界を跨ぐ
+    セッションは全量が期間側に入る近似)。
+    """
+    if DEMO:
+        return json.loads((DEMO_DIR / "usage.json").read_text(encoding="utf-8"))
+    hours = max(1, min(int(hours), 24 * 92))
+    base = f"http://{_nas_host()}:9090"
+    rng = f"{hours}h"
+
+    def per_session(metric, by):
+        return _prom_query(base, f"max by ({by}) (max_over_time({metric}[{rng}]))")
+
+    def val(r):
+        return float(r["value"][1])
+
+    def agg(rows, key):
+        out = {}
+        for r in rows:
+            k = r["metric"].get(key) or "(不明)"
+            out[k] = out.get(k, 0.0) + val(r)
+        return out
+
+    cost_rows = per_session("claude_code_cost_usage_USD_total",
+                            "session_id, model, host_name")
+    tok_rows = per_session("claude_code_token_usage_tokens_total",
+                           "session_id, model, host_name, type")
+    act_rows = per_session("claude_code_active_time_seconds_total", "session_id")
+    sessions = ({r["metric"].get("session_id") for r in cost_rows} |
+                {r["metric"].get("session_id") for r in tok_rows})
+
+    cost_host, cost_model = agg(cost_rows, "host_name"), agg(cost_rows, "model")
+    tok_host, tok_model = agg(tok_rows, "host_name"), agg(tok_rows, "model")
+    tok_type = agg(tok_rows, "type")
+
+    def merged(cost_by, tok_by, label):
+        keys = sorted(set(cost_by) | set(tok_by),
+                      key=lambda k: -cost_by.get(k, 0.0))
+        return [{label: k, "cost_usd": round(cost_by.get(k, 0.0), 4),
+                 "tokens": int(tok_by.get(k, 0.0))} for k in keys]
+
+    # 日別コスト: 各日の終端時刻で max_over_time[その日の経過秒] を評価する。
+    # 日付を跨いで生きるセッションは累計値が跨いだ先の日にも入る近似(まれ)。
+    daily = []
+    if hours >= 48:
+        now = time.time()
+        midnight = datetime.now().replace(hour=0, minute=0, second=0,
+                                          microsecond=0).timestamp()
+        for i in range(min(hours // 24, 31) - 1, -1, -1):
+            day_start = midnight - i * 86400
+            day_end = min(now, day_start + 86400)
+            rows = _prom_query(
+                base,
+                "sum(max by (session_id, model) (max_over_time("
+                f"claude_code_cost_usage_USD_total[{int(day_end - day_start)}s])))",
+                at=day_end)
+            daily.append({"date": datetime.fromtimestamp(day_start).strftime("%m-%d"),
+                          "cost_usd": round(val(rows[0]), 4) if rows else 0.0})
+
+    return {
+        "hours": hours,
+        "fetched_at": datetime.now().strftime("%m-%d %H:%M"),
+        "grafana": f"http://{_nas_host()}:3000/d/claude-code",
+        "totals": {"cost_usd": round(sum(cost_host.values()), 4),
+                   "tokens": int(sum(tok_type.values())),
+                   "sessions": len(sessions),
+                   "active_seconds": int(sum(val(r) for r in act_rows))},
+        "by_host": merged(cost_host, tok_host, "host"),
+        "by_model": merged(cost_model, tok_model, "model"),
+        "by_type": sorted(({"type": k, "tokens": int(v)} for k, v in tok_type.items()),
+                          key=lambda r: -r["tokens"]),
+        "daily": daily,
+    }
+
+
 # ---------------------------------------------------------------- http server
 
 class Handler(BaseHTTPRequestHandler):
@@ -1016,6 +1169,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(list_flags())
             elif url.path == "/api/messages":
                 self.send_json(list_messages())
+            elif url.path == "/api/usage":
+                self.send_json(usage_snapshot(q.get("hours", ["168"])[0]))
             else:
                 self.send_error(404)
         except Exception as e:  # noqa: BLE001 — API 応答としてエラーを返す
