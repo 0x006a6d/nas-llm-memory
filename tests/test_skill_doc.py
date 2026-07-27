@@ -149,22 +149,65 @@ class TestExecuteSkillDoc(unittest.TestCase):
         with h.ctx(), self.assertRaises(RuntimeError):
             h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
 
-    def test_already_moved_resumes_state_only(self):
-        """前晩にpushまで済み状態遷移だけ落ちた場合: gitを触らず状態のみ追いつかせる。"""
-        h = SkillHarness()
+    def _moved_repo(self, h):
+        """移動だけ済んだ形(候補は消え、skills/に入っている)のリポジトリを作る。"""
         repo = setup_repo(h)
-        # 施行済みの形(候補は消え、skills/に入っている)
         for p in sorted((repo / "skills-candidates" / "raster-qa").iterdir()):
             p.unlink()
         (repo / "skills-candidates" / "raster-qa").rmdir()
         (repo / "skills" / "raster-qa").mkdir()
-        git_calls = []
-        with h.ctx(), mock.patch.object(h.mod.subprocess, "run",
-                                        side_effect=lambda cmd, **kw: git_calls.append(cmd)):
+        return repo
+
+    def _fake_git(self, calls, porcelain=""):
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0, stdout=porcelain if "status" in cmd else "")
+        return run
+
+    def test_resume_pushes_before_state_update(self):
+        """移動後に落ちた文書の再開: mvはやり直さず、未コミット分をcommit+pushしてから遷移。"""
+        h = SkillHarness()
+        self._moved_repo(h)
+        calls = []
+        with h.ctx(), mock.patch.object(
+                h.mod.subprocess, "run",
+                side_effect=self._fake_git(calls, porcelain="R  skills-candidates/x -> skills/x")):
             h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
-        self.assertEqual(git_calls, [])
+        joined = [" ".join(c) for c in calls]
+        self.assertFalse(any(" mv " in c for c in joined))       # 移動はやり直さない
+        self.assertTrue(any("commit" in c for c in joined))      # 未コミットなのでcommitする
+        self.assertTrue(any("push" in c for c in joined))
+        # push が通ってから状態を進める
+        self.assertLess(max(i for i, c in enumerate(joined) if "push" in c), len(joined))
         self.assertTrue(h.sqls_like("executed_at=now()"))
-        self.assertIn("施行済みを確認", "\n".join(h.sqls_like("INSERT INTO draft_log")))
+        self.assertIn("前回の中断分", "\n".join(h.sqls_like("INSERT INTO draft_log")))
+
+    def test_resume_skips_commit_when_clean(self):
+        """commit済みでpushだけ落ちていた場合: commitはせずpushのみ。"""
+        h = SkillHarness()
+        self._moved_repo(h)
+        calls = []
+        with h.ctx(), mock.patch.object(h.mod.subprocess, "run",
+                                        side_effect=self._fake_git(calls, porcelain="")):
+            h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
+        joined = [" ".join(c) for c in calls]
+        self.assertFalse(any("commit" in c for c in joined))
+        self.assertTrue(any("push" in c for c in joined))
+
+    def test_resume_push_failure_keeps_state(self):
+        """pushが失敗したら状態は進めない(翌晩また再開する)。"""
+        h = SkillHarness()
+        self._moved_repo(h)
+
+        def run(cmd, **kw):
+            if "push" in cmd:
+                raise h.mod.subprocess.CalledProcessError(1, cmd)
+            return mock.Mock(returncode=0, stdout="")
+
+        with h.ctx(), mock.patch.object(h.mod.subprocess, "run", side_effect=run):
+            with self.assertRaises(Exception):
+                h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
+        self.assertEqual(h.sqls_like("executed_at=now()"), [])
 
     def test_missing_src_without_dst_still_errors(self):
         h = SkillHarness()

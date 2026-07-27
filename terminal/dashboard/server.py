@@ -1162,14 +1162,15 @@ def save_batch_config(body):
             merged[k] = v
         new["ringi"] = merged
     text = json.dumps(new, ensure_ascii=False, indent=1) + "\n"
-    # 同一ディレクトリの一時ファイルへ受けてからmvで差し替える(転送が途中で切れても
-    # 稼働中のconfig.jsonが半端なJSONにならない。バッチはこれを毎晩読む)
+    # 同一ディレクトリの一時ファイル(名前は重ならないようmktemp)へ受け、JSONとして
+    # 読めることを確かめてからmvで差し替える。転送が途中で切れても稼働中の
+    # config.jsonが半端なJSONにならない(バッチはこれを毎晩読む)
     proc = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", SSH_TARGET,
-         f"cp {BATCH_CONFIG_REMOTE} {BATCH_CONFIG_REMOTE}.bak 2>/dev/null; "
-         f"cat > {BATCH_CONFIG_REMOTE}.tmp && "
-         f"python3 -c 'import json,sys; json.load(open(sys.argv[1]))' {BATCH_CONFIG_REMOTE}.tmp && "
-         f"mv {BATCH_CONFIG_REMOTE}.tmp {BATCH_CONFIG_REMOTE}"],
+         f"set -e; cp {BATCH_CONFIG_REMOTE} {BATCH_CONFIG_REMOTE}.bak 2>/dev/null || true; "
+         f"t=$(mktemp {BATCH_CONFIG_REMOTE}.XXXXXX); trap 'rm -f \"$t\"' EXIT; "
+         'cat > "$t"; python3 -c \'import json,sys; json.load(open(sys.argv[1]))\' "$t"; '
+         f'mv "$t" {BATCH_CONFIG_REMOTE}; trap - EXIT'],
         input=text.encode(), capture_output=True, timeout=15)
     if proc.returncode != 0:
         raise RuntimeError(f"書き込み失敗: {proc.stderr.decode(errors='replace')[-300:]}")

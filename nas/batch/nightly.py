@@ -1257,11 +1257,22 @@ def execute_skill_doc(draft_id: int, name: str, run_id: int):
     src = REPO_DIR / "skills-candidates" / name
     dst = REPO_DIR / "skills" / name
     if dst.is_dir() and not src.exists():
-        # 前回のrunでgit mv+pushまで済み、状態遷移だけ落ちた場合の再実行。
-        # 配布は完了しているので文書の状態だけ追いつかせる
+        # 前回のrunで移動まで済み、その後(commit/push/状態遷移のどれか)で落ちた場合の再実行。
+        # どこで落ちたか分からないので、未コミットなら commit し、push してから状態を進める
+        # (pushが通っていなければここで配布し、通っていればpushは何もしない)
+        dirty = subprocess.run(
+            ["git", "-C", str(REPO_DIR), "status", "--porcelain", "--",
+             "skills", "skills-candidates"],
+            check=True, capture_output=True, timeout=60, text=True).stdout.strip()
+        if dirty:
+            subprocess.run(["git", "-C", str(REPO_DIR)] + GIT_ENV +
+                           ["commit", "-q", "-m", f"ringi run {run_id}: スキル{name}を登載",
+                            "--", "skills", "skills-candidates"], check=True, timeout=60)
+        subprocess.run(["git", "-C", str(REPO_DIR), "push", "-q"], check=True, timeout=120)
         advance_draft(draft_id, "approved", "shiko")
-        record_draft(draft_id, "system", "shiko", run_id, memo=f"skills/{name} へ登載(施行済みを確認)")
-        log(f"  skill {name}: 施行済みを確認し状態のみ更新")
+        record_draft(draft_id, "system", "shiko", run_id,
+                     memo=f"skills/{name} へ登載(前回の中断分を再開)")
+        log(f"  skill {name}: 前回の中断分を施行(状態を更新)")
         return
     if not src.is_dir():
         raise RuntimeError(f"skill施行: 候補 {name} が見つからない")

@@ -5,6 +5,7 @@ psql/ask_claude/shortlist_factsをモックし、審査・補正ループ・上�
 実行: python3 -m unittest discover tests
 """
 import json
+import re
 import unittest
 from unittest import mock
 
@@ -217,9 +218,11 @@ class TestKessaiBatching(unittest.TestCase):
         self.assertEqual(len(kessai_calls), 2)              # 2プロンプトに分かれた
         self.assertEqual([r["memo"] for r in res], ["0", "1", "2", "3"])  # 元の順序
         self.assertEqual(res[2]["action"], "hiketsu")
-        # 案件番号はプロンプトごとに0から振り直す
+        # 案件番号はプロンプトごとに0から連番で振り直す
         for _, _, prompt in kessai_calls:
-            self.assertIn("[0] 候補:", prompt)
+            nums = [int(n) for n in re.findall(r"^\[(\d+)\] 候補:", prompt, re.M)]
+            self.assertEqual(nums, list(range(len(nums))))
+            self.assertEqual(len(nums), 2)
 
     def test_malformed_batch_falls_back_to_approve(self):
         h = Harness(shortlist=[{"id": 41, "content": "旧事実"}])
