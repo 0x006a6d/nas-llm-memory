@@ -70,7 +70,8 @@ class TestTransitions(unittest.TestCase):
             states.add(ringi.TRANSITIONS[(frm, act)])
         for s in states:
             self.assertIn(f"'{s}'", sql, f"state {s} が012_ringi.sqlのCHECKに無い")
-        actions = {a for _, a in ringi.TRANSITIONS} | {"kian", "kouetsu"}
+        # TRANSITIONSのaction + 状態遷移を伴わない記帳(起案・後閲・skill移動の中断判定用)
+        actions = {a for _, a in ringi.TRANSITIONS} | {"kian", "kouetsu", "skill_mv"}
         for a in actions:
             self.assertIn(f"'{a}'", sql, f"action {a} が012_ringi.sqlのCHECKに無い")
 

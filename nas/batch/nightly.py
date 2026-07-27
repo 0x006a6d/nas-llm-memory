@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import ringi
@@ -280,6 +281,15 @@ def fail(run_id, msg: str):
         # 補償: このrunの部分書き込み(facts・未pushの配布物)を破棄し、
         # watermarkが進まないまま翌晩やり直しても重複挿入されないようにする
         compensations = (
+            # 再審理の巻き戻し(drafts削除より先に): このrunで起票した是正文書(saishinri)が
+            # 参照する原文書を差し戻し状態へ戻す。是正文書・是正factsはこの後の補償で消えるため、
+            # 原文書が「後閲対応済み(seen)」のまま残ると再差し戻しの機会が失われる
+            ("reexamine-rollback", lambda: psql(
+                "UPDATE drafts SET state='reexamine', seen_state='remanded' "
+                "WHERE id IN (SELECT related_doc FROM drafts "
+                f"WHERE kind='saishinri' AND created_by={q('run-' + str(run_id))} "
+                "AND related_doc IS NOT NULL);")
+                if drafts_ok() else None),
             # draftsを先に消す: draft_facts/draft_logはCASCADEで消え、facts削除のFK障害を避ける。
             # 施行済みのskill文書だけは残す: git pushで全端末へ配布済み(取り消せない)ため、
             # 文書と回議録を消すと配布の根拠が残らない。他は消してよい(factsもこの後消える)
@@ -753,14 +763,35 @@ def trial_metrics(clusters: list, counts: dict) -> dict:
     return out
 
 
-def align_trial(project: str, results: dict) -> list:
-    """モデル別候補の和集合を審査モデル1呼び出しでクラスタリング+価値判定。"""
+# 突合プロンプトの総量上限(審査・決裁と同じ)。候補が多い晩に1プロンプトへ無制限連結すると
+# 入力上限に当たり、呼び出し元が例外を握りつぶす設計と相まって「毎晩WARNだけ出て何も
+# 測れていない」状態に静かに陥る。モデルごとに枠を按分して先頭から切り詰める
+# (突合は全体を見る必要があるため、分割すると跨りの同一候補を束ねられない)
+TRIAL_ALIGN_BUDGET_CHARS = ORGANIZE_BUDGET_CHARS
+
+
+def align_trial(project: str, results: dict) -> tuple[list, dict]:
+    """モデル別候補の和集合を審査モデル1呼び出しでクラスタリング+価値判定。
+
+    返り値 (clusters, omitted)。omitted={モデル: 枠超過で切り落とした候補数}で、
+    summary.md/metricsで切り落としが見えるようにする(indexは元の連番を維持)。
+    """
     keys = list(results)
     letters = trial_letters(keys)
-    blocks = []
+    per_model = max(2000, TRIAL_ALIGN_BUDGET_CHARS // max(1, len(keys)))
+    blocks, omitted = [], {}
     for k in keys:
         lines = [f"## モデル{letters[k]}"]
-        lines += [f"[{i}] {c['content']}" for i, c in enumerate(results[k])] or []
+        size = 0
+        for i, c in enumerate(results[k]):
+            line = f"[{i}] {c['content']}"
+            if size + len(line) > per_model:
+                omitted[k] = len(results[k]) - i
+                break
+            lines.append(line)
+            size += len(line) + 1
+        else:
+            omitted[k] = 0
         if not results[k]:
             lines.append("(候補なし)")
         blocks.append("\n".join(lines))
@@ -784,38 +815,59 @@ def align_trial(project: str, results: dict) -> list:
                                  if isinstance(i, int) and 0 <= i < len(results[k])})
         norm.append({"members": members, "value": bool(c.get("value")),
                      "reason": str(c.get("reason") or "")[:200]})
-    return norm
+    return norm, omitted
 
 
 def trial_summary_rows(run_id: int, project: str, metrics: dict) -> list:
     def pct(v):
         return "-" if v is None else f"{v * 100:.0f}%"
-    return [f"| {run_id} | {project} | {k} | {m['cands']} | {m['hit']}/{m['valuable']} "
-            f"| {pct(m['miss_rate'])} | {pct(m['noise_rate'])} |"
-            for k, m in metrics.items()]
+    rows = []
+    for k, m in metrics.items():
+        # 枠超過で突合に載せられなかった候補数を併記する(沈黙の切り落としを防ぐ)
+        cands = f"{m['cands']}(-{m['omitted']})" if m.get("omitted") else str(m["cands"])
+        rows.append(f"| {run_id} | {project} | {k} | {cands} | {m['hit']}/{m['valuable']} "
+                    f"| {pct(m['miss_rate'])} | {pct(m['noise_rate'])} |")
+    return rows
 
 
 def trial_project(project: str, chunks: list, baseline: list, run_id: int,
-                  base_model: str | None = None):
+                  base_model: str | None = None, deadline: float | None = None):
     """試行(第1期): 同一チャンクを起案候補モデルでもverifyし、突合表を書く。
 
     本番runの watermark・facts には一切影響しない(結果はファイルへ記録のみ)。
     呼び出し元が例外を握りつぶす前提(試行の失敗で本番runをfailedにしない)。
     base_model: 本番verifyに使ったモデル(突合表の基準列のラベル)。
+    deadline: 試行全体の打ち切り時刻(time.monotonic基準)。超えたら残りの
+    試行モデルは見送る(verify回数が trial_models 倍に膨らみ、04:00チェーンを
+    欠測させないため。見送ったモデルは記録に残す)。
     """
     settings = ringi.ringi_settings(BATCH_CONFIG)
     base_key = base_model or BATCH_MODEL or "(cli-default)"
     results = {base_key: baseline}
+    skipped = []
     for m in settings["trial_models"]:
         if m in results:
+            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            skipped.append(m)
             continue
         cands = []
         for turn_chunk, mem_chunk in chunks:
             cands += verify_project(project, turn_chunk, mem_chunk, run_id,
                                     model=m, label_prefix="trial-verify")
         results[m] = cands
-    clusters = align_trial(project, results)
-    metrics = trial_metrics(clusters, {k: len(v) for k, v in results.items()})
+    if skipped:
+        log(f"  trial {project}: 時間枠超過のため {', '.join(skipped)} は見送り")
+    # 全モデル空の晩は突合呼び出しを省く(記録は残す)
+    if any(results.values()):
+        clusters, omitted = align_trial(project, results)
+    else:
+        clusters, omitted = [], {}
+    # 率の分母は突合に実際に載せた候補数(切り落とし分はomittedで別記)
+    metrics = trial_metrics(clusters, {k: len(v) - omitted.get(k, 0)
+                                       for k, v in results.items()})
+    for k in metrics:
+        metrics[k]["omitted"] = omitted.get(k, 0)
 
     tdir = SYSTEM_DIR / "batch" / "trial"
     tdir.mkdir(parents=True, exist_ok=True)
@@ -825,7 +877,8 @@ def trial_project(project: str, chunks: list, baseline: list, run_id: int,
                     "candidates": {k: [{"content": c["content"], "status": c["status"],
                                         "scope": c["scope"]} for c in v]
                                    for k, v in results.items()},
-                    "clusters": clusters, "metrics": metrics},
+                    "clusters": clusters, "metrics": metrics,
+                    "omitted": omitted, "skipped_models": skipped},
                    ensure_ascii=False, indent=1),
         encoding="utf-8")
 
@@ -1247,6 +1300,13 @@ def _existing_skills_brief() -> str:
     return "\n".join(lines) or "(なし)"
 
 
+def _skill_mv_recorded(draft_id: int) -> bool:
+    """移動完了の記帳(skill_mv)があるか。中断再開の判定はファイル状態の推測でなく
+    この記録を見る(後閲待ちの間に人間が同名スキルを手で作った場合を中断分と誤認しない)。"""
+    return int(psql(f"SELECT count(*) FROM draft_log WHERE draft_id={int(draft_id)} "
+                    "AND action='skill_mv';") or 0) >= 1
+
+
 def execute_skill_doc(draft_id: int, name: str, run_id: int):
     """skill文書の施行: skills-candidates/<name> を skills/<name> へ移してcommit&push。
 
@@ -1258,6 +1318,12 @@ def execute_skill_doc(draft_id: int, name: str, run_id: int):
     dst = REPO_DIR / "skills" / name
     if dst.is_dir() and not src.exists():
         # 前回のrunで移動まで済み、その後(commit/push/状態遷移のどれか)で落ちた場合の再実行。
+        # ただし再開は移動完了の記帳(skill_mv)がある場合に限る。記帳が無いのに
+        # skills/<name> があるのは手動作成の可能性があり、無関係な作業を登載できない
+        if not _skill_mv_recorded(draft_id):
+            raise RuntimeError(
+                f"skill施行: skills/{name} が既にあるが移動の記帳が無い"
+                "(手動作成の可能性。確認してから処理してほしい)")
         # どこで落ちたか分からないので、未コミットなら commit し、push してから状態を進める
         # (pushが通っていなければここで配布し、通っていればpushは何もしない)
         dirty = subprocess.run(
@@ -1294,6 +1360,9 @@ def execute_skill_doc(draft_id: int, name: str, run_id: int):
     subprocess.run(["git", "-C", str(REPO_DIR), "mv",
                     f"skills-candidates/{name}", f"skills/{name}"],
                    check=True, capture_output=True, timeout=60)
+    # 移動完了を記帳: この後で落ちた場合、翌晩の再開判定はこの記録を見る(推測しない)
+    record_draft(draft_id, "system", "skill_mv", run_id,
+                 memo=f"skills-candidates/{name} → skills/{name} へ移動")
     subprocess.run(["git", "-C", str(REPO_DIR)] + GIT_ENV +
                    ["commit", "-q", "-m", f"ringi run {run_id}: スキル{name}を登載",
                     "--", "skills", "skills-candidates"],
@@ -1771,7 +1840,11 @@ def main(trial: bool = False):
         return
 
     # 試行(第1期)はフラグまたはconfig(ringi.trial)で発動。本番系には影響しない
-    trial_on = trial or ringi.ringi_settings(BATCH_CONFIG)["trial"]
+    rs0 = ringi.ringi_settings(BATCH_CONFIG)
+    trial_on = trial or rs0["trial"]
+    # 試行の所要時間枠(全プロジェクト共通の打ち切り時刻)
+    trial_deadline = (time.monotonic() + rs0["trial_budget_min"] * 60
+                      if trial_on else None)
     run_id = None
     try:
         # 配布先リポジトリを最新化
@@ -1836,7 +1909,7 @@ def main(trial: bool = False):
                 # 試行の失敗は本番runに波及させない(記録のみで握りつぶす)
                 try:
                     trial_project(project, chunks, candidates, run_id,
-                                  base_model=kian_model)
+                                  base_model=kian_model, deadline=trial_deadline)
                 except Exception as exc:
                     log(f"  WARN trial {project}: {type(exc).__name__}: {exc}")
             if not candidates:

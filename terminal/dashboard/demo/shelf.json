@@ -28,7 +28,7 @@
    "log": [
     {"id": 1, "actor": "kian:claude-haiku-4-5-20251001", "action": "kian", "memo": null, "created_at": "2026-07-27T03:02:00", "created_by": "run-10"},
     {"id": 2, "actor": "shinsa:claude-sonnet-5", "action": "joshin", "memo": "既存41と矛盾(置換上申)", "created_at": "2026-07-27T03:02:30", "created_by": "run-10"},
-    {"id": 3, "actor": "kessai:claude-opus-4-6", "action": "kessai_ok", "memo": null, "created_at": "2026-07-27T03:03:00", "created_by": "run-10"},
+    {"id": 3, "actor": "kessai:claude-opus-4-8", "action": "kessai_ok", "memo": null, "created_at": "2026-07-27T03:03:00", "created_by": "run-10"},
     {"id": 4, "actor": "system", "action": "shiko", "memo": "facts登載2件 登載外0件", "created_at": "2026-07-27T03:03:05", "created_by": "run-10"},
     {"id": 5, "actor": "human", "action": "kouetsu", "memo": null, "created_at": "2026-07-27T09:00:00", "created_by": "dashboard-20260727"}
    ],
@@ -64,7 +64,7 @@
    "log": [
     {"id": 9, "actor": "skill-scout", "action": "kian", "memo": "検出3回", "created_at": "2026-07-27T03:05:00", "created_by": "run-10"},
     {"id": 10, "actor": "shinsa:claude-sonnet-5", "action": "joshin", "memo": "既存スキルと重複なし・手順具体的", "created_at": "2026-07-27T03:05:30", "created_by": "run-10"},
-    {"id": 11, "actor": "kessai:claude-opus-4-6", "action": "kessai_ok", "memo": "登載可", "created_at": "2026-07-27T03:06:00", "created_by": "run-10"}
+    {"id": 11, "actor": "kessai:claude-opus-4-8", "action": "kessai_ok", "memo": "登載可", "created_at": "2026-07-27T03:06:00", "created_by": "run-10"}
    ],
    "facts": [], "related": []
   }

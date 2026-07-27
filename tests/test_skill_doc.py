@@ -3,6 +3,7 @@
 実行: python3 -m unittest discover tests
 """
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,8 +12,11 @@ from unittest import mock
 from test_ringi_flow import Harness
 
 
-def setup_repo(h, name="raster-qa", count=3, kind="new", skill_md="# 手順\n1. やる\n"):
+def setup_repo(h, name="raster-qa", count=3, kind="new", skill_md="# 手順\n1. やる\n",
+               case=None):
     repo = Path(tempfile.mkdtemp(prefix="repo-test-"))
+    if case is not None:  # /tmp に残骸を残さない
+        case.addCleanup(shutil.rmtree, repo, ignore_errors=True)
     h.mod.REPO_DIR = repo
     d = repo / "skills-candidates" / name
     d.mkdir(parents=True)
@@ -28,6 +32,7 @@ class SkillHarness(Harness):
     def __init__(self, config=None):
         super().__init__(config=config)
         self.skill_prev = None  # 起票済み判定クエリへの応答(list or None)
+        self.skill_mv_count = "1"  # 移動完了の記帳(再開テスト用。"0"=記帳なし)
 
     def fake_psql(self, sql):
         if "payload->>'name'" in sql:
@@ -35,6 +40,9 @@ class SkillHarness(Harness):
             return json.dumps(self.skill_prev) if self.skill_prev else ""
         if sql.startswith("SELECT state FROM drafts"):
             return "pending_review"
+        if sql.startswith("SELECT count(*) FROM draft_log"):
+            self.sqls.append(sql)
+            return self.skill_mv_count
         return super().fake_psql(sql)
 
     def scan(self):
@@ -45,26 +53,26 @@ class SkillHarness(Harness):
 class TestSkillScan(unittest.TestCase):
     def test_below_min_count_not_filed(self):
         h = SkillHarness()
-        setup_repo(h, count=1)
+        setup_repo(h, count=1, case=self)
         h.scan()
         self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])
 
     def test_improve_kind_skipped(self):
         h = SkillHarness()
-        setup_repo(h, kind="improve")
+        setup_repo(h, kind="improve", case=self)
         h.scan()
         self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])
 
     def test_collision_with_existing_skill_skipped(self):
         h = SkillHarness()
-        repo = setup_repo(h)
+        repo = setup_repo(h, case=self)
         (repo / "skills" / "raster-qa").mkdir()
         h.scan()
         self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])
 
     def test_happy_path_stops_at_approved(self):
         h = SkillHarness()
-        setup_repo(h)
+        setup_repo(h, case=self)
         h.scripts["shinsa-skill"] = [{"action": "joshin", "memo": "重複なし・手順具体的"}]
         h.scripts["kessai-skill"] = [{"action": "approve", "memo": "登載可"}]
         h.scan()
@@ -83,7 +91,7 @@ class TestSkillScan(unittest.TestCase):
 
     def test_shinsa_hiketsu(self):
         h = SkillHarness()
-        setup_repo(h)
+        setup_repo(h, case=self)
         h.scripts["shinsa-skill"] = [{"action": "hiketsu", "memo": "既存と重複"}]
         h.scan()
         self.assertTrue(h.sqls_like("state='rejected'"))
@@ -91,19 +99,19 @@ class TestSkillScan(unittest.TestCase):
 
     def test_already_filed_skipped(self):
         h = SkillHarness()
-        setup_repo(h, count=3)
+        setup_repo(h, count=3, case=self)
         h.skill_prev = [{"state": "approved", "count": "3"}]
         h.scan()
         self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])
 
     def test_rejected_refiled_only_with_more_evidence(self):
         h = SkillHarness()
-        setup_repo(h, count=3)
+        setup_repo(h, count=3, case=self)
         h.skill_prev = [{"state": "rejected", "count": "3"}]
         h.scan()
         self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])  # count同じ→再起票しない
         h2 = SkillHarness()
-        setup_repo(h2, count=5)
+        setup_repo(h2, count=5, case=self)
         h2.skill_prev = [{"state": "rejected", "count": "3"}]
         h2.scripts["shinsa-skill"] = [{"action": "joshin", "memo": "ok"}]
         h2.scripts["kessai-skill"] = [{"action": "approve", "memo": "ok"}]
@@ -112,7 +120,7 @@ class TestSkillScan(unittest.TestCase):
 
     def test_auto_execute_calls_shiko(self):
         h = SkillHarness(config={"ringi": {"skill_auto_execute": True}})
-        setup_repo(h)
+        setup_repo(h, case=self)
         h.scripts["shinsa-skill"] = [{"action": "joshin", "memo": "ok"}]
         h.scripts["kessai-skill"] = [{"action": "approve", "memo": "ok"}]
         with mock.patch.object(h.mod, "execute_skill_doc") as ex:
@@ -123,7 +131,7 @@ class TestSkillScan(unittest.TestCase):
 class TestExecuteSkillDoc(unittest.TestCase):
     def test_frontmatter_injected_and_git_called(self):
         h = SkillHarness()
-        repo = setup_repo(h, skill_md="# 手順\n1. やる\n")  # frontmatterなし
+        repo = setup_repo(h, skill_md="# 手順\n1. やる\n", case=self)  # frontmatterなし
         git_calls = []
 
         def fake_run(cmd, **kw):
@@ -140,18 +148,20 @@ class TestExecuteSkillDoc(unittest.TestCase):
         self.assertTrue(any("push" in c for c in joined))
         # 遷移approved→shikoと回議録
         self.assertTrue(h.sqls_like("executed_at=now()"))
-        self.assertIn("skills/raster-qa へ登載", "\n".join(h.sqls_like("INSERT INTO draft_log")))
+        logs = "\n".join(h.sqls_like("INSERT INTO draft_log"))
+        self.assertIn("skills/raster-qa へ登載", logs)
+        self.assertIn("'skill_mv'", logs)  # 移動完了の記帳(中断再開の判定根拠)
 
     def test_existing_dst_rejected(self):
         h = SkillHarness()
-        repo = setup_repo(h)
+        repo = setup_repo(h, case=self)
         (repo / "skills" / "raster-qa").mkdir()
         with h.ctx(), self.assertRaises(RuntimeError):
             h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
 
     def _moved_repo(self, h):
         """移動だけ済んだ形(候補は消え、skills/に入っている)のリポジトリを作る。"""
-        repo = setup_repo(h)
+        repo = setup_repo(h, case=self)
         for p in sorted((repo / "skills-candidates" / "raster-qa").iterdir()):
             p.unlink()
         (repo / "skills-candidates" / "raster-qa").rmdir()
@@ -168,18 +178,29 @@ class TestExecuteSkillDoc(unittest.TestCase):
         """移動後に落ちた文書の再開: mvはやり直さず、未コミット分をcommit+pushしてから遷移。"""
         h = SkillHarness()
         self._moved_repo(h)
-        calls = []
-        with h.ctx(), mock.patch.object(
-                h.mod.subprocess, "run",
-                side_effect=self._fake_git(calls, porcelain="R  skills-candidates/x -> skills/x")):
+        order = []  # git呼び出しとSQLを同一のイベント列に記録し、順序を直接比較する
+        base_psql = h.fake_psql
+
+        def tracking_psql(sql):
+            order.append("sql: " + sql)
+            return base_psql(sql)
+
+        def tracking_git(cmd, **kw):
+            order.append("git: " + " ".join(cmd))
+            return mock.Mock(returncode=0,
+                             stdout="R  skills-candidates/x -> skills/x" if "status" in cmd else "")
+
+        with mock.patch.object(h.mod, "psql", side_effect=tracking_psql), \
+                mock.patch.object(h.mod.subprocess, "run", side_effect=tracking_git):
             h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
-        joined = [" ".join(c) for c in calls]
-        self.assertFalse(any(" mv " in c for c in joined))       # 移動はやり直さない
-        self.assertTrue(any("commit" in c for c in joined))      # 未コミットなのでcommitする
-        self.assertTrue(any("push" in c for c in joined))
-        # push が通ってから状態を進める
-        self.assertLess(max(i for i, c in enumerate(joined) if "push" in c), len(joined))
-        self.assertTrue(h.sqls_like("executed_at=now()"))
+        git = [e for e in order if e.startswith("git: ")]
+        self.assertFalse(any(" mv " in e for e in git))       # 移動はやり直さない
+        self.assertTrue(any("commit" in e for e in git))      # 未コミットなのでcommitする
+        self.assertTrue(any("push" in e for e in git))
+        # push が通ってから状態(executed_at)を進める: gitイベントとSQLイベントの位置を直接比較
+        i_push = max(i for i, e in enumerate(order) if e.startswith("git: ") and "push" in e)
+        i_exec = min(i for i, e in enumerate(order) if "executed_at=now()" in e)
+        self.assertLess(i_push, i_exec)
         self.assertIn("前回の中断分", "\n".join(h.sqls_like("INSERT INTO draft_log")))
 
     def test_resume_skips_commit_when_clean(self):
@@ -205,18 +226,31 @@ class TestExecuteSkillDoc(unittest.TestCase):
             return mock.Mock(returncode=0, stdout="")
 
         with h.ctx(), mock.patch.object(h.mod.subprocess, "run", side_effect=run):
-            with self.assertRaises(Exception):
+            with self.assertRaises(h.mod.subprocess.CalledProcessError):
                 h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
         self.assertEqual(h.sqls_like("executed_at=now()"), [])
 
     def test_missing_src_without_dst_still_errors(self):
         h = SkillHarness()
-        repo = setup_repo(h)
+        repo = setup_repo(h, case=self)
         for p in sorted((repo / "skills-candidates" / "raster-qa").iterdir()):
             p.unlink()
         (repo / "skills-candidates" / "raster-qa").rmdir()
         with h.ctx(), self.assertRaises(RuntimeError):
             h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
+
+    def test_resume_without_mv_record_rejected(self):
+        """移動の記帳が無いのに skills/<name> がある=手動作成の可能性。誤って登載しない。"""
+        h = SkillHarness()
+        h.skill_mv_count = "0"  # 記帳なし
+        self._moved_repo(h)
+        calls = []
+        with h.ctx(), mock.patch.object(h.mod.subprocess, "run",
+                                        side_effect=self._fake_git(calls)):
+            with self.assertRaises(RuntimeError):
+                h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
+        self.assertEqual(h.sqls_like("executed_at=now()"), [])
+        self.assertEqual(calls, [])  # gitも触らない
 
 
 if __name__ == "__main__":

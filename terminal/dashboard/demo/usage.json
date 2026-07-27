@@ -1,6 +1,6 @@
 {
   "hours": 168,
-  "fetched_at": "01-01 12:00",
+  "fetched_at": "07-21 12:00",
   "grafana": "http://nas.example:3000/d/claude-code",
   "totals": {"cost_usd": 12.34, "tokens": 45600000, "sessions": 21, "active_seconds": 43200},
   "by_host": [
@@ -9,7 +9,8 @@
     {"host": "Mac-mini", "cost_usd": 0.8, "tokens": 2500000}
   ],
   "by_model": [
-    {"model": "claude-fable-5", "cost_usd": 11.2, "tokens": 38000000},
+    {"model": "claude-opus-4-8", "cost_usd": 7.9, "tokens": 29000000},
+    {"model": "claude-sonnet-5", "cost_usd": 3.3, "tokens": 9000000},
     {"model": "claude-haiku-4-5-20251001", "cost_usd": 1.14, "tokens": 7600000}
   ],
   "by_type": [
@@ -19,9 +20,9 @@
     {"type": "input", "tokens": 200000}
   ],
   "daily": [
-    {"date": "12-26", "cost_usd": 1.1}, {"date": "12-27", "cost_usd": 2.4},
-    {"date": "12-28", "cost_usd": 0.0}, {"date": "12-29", "cost_usd": 3.2},
-    {"date": "12-30", "cost_usd": 1.8}, {"date": "12-31", "cost_usd": 2.6},
-    {"date": "01-01", "cost_usd": 1.24}
+    {"date": "07-15", "cost_usd": 1.1}, {"date": "07-16", "cost_usd": 2.4},
+    {"date": "07-17", "cost_usd": 0.0}, {"date": "07-18", "cost_usd": 3.2},
+    {"date": "07-19", "cost_usd": 1.8}, {"date": "07-20", "cost_usd": 2.6},
+    {"date": "07-21", "cost_usd": 1.24}
   ]
 }

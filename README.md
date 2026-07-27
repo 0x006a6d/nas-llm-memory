@@ -50,7 +50,7 @@
 - 起案文書 — facts 登載・index 改定・skill 登載の判断を 1 件ずつ伺い文 (「下記のとおり登載してよろしいか」+ 別記) 付きの文書として起票し、年度別連番の文書番号を採番して `drafts` に保存する。処理履歴は回議録 (`draft_log`) に残る
 - 差し戻し — 全階層共通で「メモを付与して前の担当者に戻す」。審査→起案者 (内容不備の補正指示、上限往復数超過で廃案)、決裁→審査 (再判定)、人間の後閲→決裁者 (翌晩の便で再審理し、是正の saishinri 文書を起票する)
 - 後閲 — バッチは無人で施行まで進み (代決)、人間は dashboard の書架タブで事後確認する。後閲印または差し戻し。skill の施行 (skills/ 本体への登載 = 全端末配布) だけは人間の後閲印を施行条件とする (`ringi.skill_auto_execute` で解除可)
-- 試行 (第 1 期) — `ringi.trial` または `nightly.py --trial` で、起案候補モデル (`ringi.trial_models`) を本番 run の内側で並行実行し、審査モデルの突合で拾い漏れ率・誤拾い率を `batch/trial/summary.md` に実測する。facts には入れない。数晩の実測で `roles.kian` を決めてから `enabled` を入れる想定
+- 試行 (第 1 期) — `ringi.trial` または `nightly.py --trial` で、起案候補モデル (`ringi.trial_models`) を本番 run の内側で並行実行し、審査モデルの突合で拾い漏れ率・誤拾い率を `batch/trial/summary.md` に実測する。facts には入れない。数晩の実測で `roles.kian` を決めてから `enabled` を入れる想定。所要時間は `ringi.trial_budget_min` (既定 25 分) で打ち止めし、04:00 チェーンの欠測を防ぐ (見送り・切り落とし分は突合表に記録される)
 
 適用は 2 段階: コードを deploy しても `enabled` が立つまで挙動は変わらないので、先に配置して従来動作を確認してから config を切り替える。専決規程 (roles と主要フラグ) は dashboard の書架タブからも変更できる (翌晩から反映)。
 

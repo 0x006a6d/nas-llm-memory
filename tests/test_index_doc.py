@@ -2,6 +2,7 @@
 
 実行: python3 -m unittest discover tests
 """
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,10 +11,13 @@ from unittest import mock
 from test_ringi_flow import Harness
 
 
-def make(h, body_lines, key="proj"):
+def make(h, body_lines, key="proj", case=None):
     """enrich_ringiをbuild_index_bodyモックで走らせる。"""
     body = "\n".join(body_lines) + "\n"
-    h.mod.REPO_DIR = Path(tempfile.mkdtemp(prefix="repo-test-"))
+    repo = Path(tempfile.mkdtemp(prefix="repo-test-"))
+    if case is not None:  # /tmp に残骸を残さない
+        case.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+    h.mod.REPO_DIR = repo
     with h.ctx(), mock.patch.object(h.mod, "build_index_body",
                                     return_value=(body, len(body_lines))):
         return h.mod.enrich_ringi(key, run_id=9), body
@@ -22,7 +26,7 @@ def make(h, body_lines, key="proj"):
 class TestIndexDoc(unittest.TestCase):
     def test_new_index_is_senketsu(self):
         h = Harness()
-        n, body = make(h, ["# t", "内容A"])
+        n, body = make(h, ["# t", "内容A"], case=self)
         self.assertEqual(n, 2)
         self.assertEqual(h.mod.index_path("proj").read_text(encoding="utf-8"), body)
         drafts = h.sqls_like("INSERT INTO drafts")
@@ -33,7 +37,9 @@ class TestIndexDoc(unittest.TestCase):
 
     def test_unchanged_files_no_draft(self):
         h = Harness()
-        h.mod.REPO_DIR = Path(tempfile.mkdtemp(prefix="repo-test-"))
+        repo = Path(tempfile.mkdtemp(prefix="repo-test-"))
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        h.mod.REPO_DIR = repo
         body = "# t\n内容A\n"
         p = h.mod.index_path("proj")
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -45,7 +51,9 @@ class TestIndexDoc(unittest.TestCase):
         self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])
 
     def _with_old(self, h, old_lines, new_lines, kessai_script=None):
-        h.mod.REPO_DIR = Path(tempfile.mkdtemp(prefix="repo-test-"))
+        repo = Path(tempfile.mkdtemp(prefix="repo-test-"))
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        h.mod.REPO_DIR = repo
         p = h.mod.index_path("proj")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("\n".join(old_lines) + "\n", encoding="utf-8")

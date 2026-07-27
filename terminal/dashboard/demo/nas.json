@@ -80,11 +80,11 @@
  "fetched_at": "demo",
  "shelf_pending": 2,
  "batch_config": {
-  "model": "claude-opus-4-6",
+  "model": "claude-opus-4-8",
   "roles": {
    "kian": "claude-haiku-4-5-20251001",
    "shinsa": "claude-sonnet-5",
-   "kessai": "claude-opus-4-6",
+   "kessai": "claude-opus-4-8",
    "enrich": "claude-sonnet-5"
   },
   "ringi": {

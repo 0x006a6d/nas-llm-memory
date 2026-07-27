@@ -15,7 +15,7 @@
   --hairline-strong: rgba(0, 0, 0, 0.14);
   --text: #26241f;
   --muted: #7a7264;
-  --faint: #a29a8c;
+  --faint: #8b8375;
   --amber: var(--accent);
   --amber-dim: color-mix(in oklab, var(--accent) 12%, transparent);
   --on-amber: #ffffff;

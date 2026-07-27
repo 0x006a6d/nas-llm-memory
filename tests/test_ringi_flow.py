@@ -4,6 +4,7 @@ psql/ask_claude/shortlist_factsをモックし、審査・補正ループ・上�
 分岐と、drafts/draft_log/draft_factsへ流れるSQLを検証する。
 実行: python3 -m unittest discover tests
 """
+import contextlib
 import json
 import re
 import unittest
@@ -58,14 +59,17 @@ class Harness:
         kind = label.split(":")[0]
         return json.dumps(self.scripts[kind].pop(0), ensure_ascii=False)
 
+    @contextlib.contextmanager
     def ctx(self):
-        from contextlib import ExitStack
-        stack = ExitStack()
-        stack.enter_context(mock.patch.object(self.mod, "psql", side_effect=self.fake_psql))
-        stack.enter_context(mock.patch.object(self.mod, "ask_claude", side_effect=self.fake_ask))
-        stack.enter_context(mock.patch.object(
-            self.mod, "shortlist_facts", side_effect=lambda key, content, k=10: self.shortlist))
-        return stack
+        """モック差し込み。withに入るまでpatchを有効化しない(漏れ防止)。"""
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(self.mod, "psql", side_effect=self.fake_psql))
+            stack.enter_context(mock.patch.object(self.mod, "ask_claude",
+                                                  side_effect=self.fake_ask))
+            stack.enter_context(mock.patch.object(
+                self.mod, "shortlist_facts",
+                side_effect=lambda key, content, k=10: self.shortlist))
+            yield stack
 
     def run(self, candidates, project="proj"):
         with self.ctx():
@@ -246,6 +250,19 @@ class TestFailCompensation(unittest.TestCase):
         # factsは従来どおりrun単位で全削除
         self.assertTrue(any("DELETE FROM facts WHERE created_by='run-9'" in s
                             for s in h.sqls))
+
+    def test_reexamine_rolled_back_before_drafts_delete(self):
+        """このrunで再審理した原文書を差し戻し状態へ戻す(是正文書・factsが消えるため)。
+        drafts削除より先に行わないと、是正文書が消えて対象を特定できなくなる。"""
+        h = Harness()
+        with h.ctx(), mock.patch.object(h.mod, "reset_repo"), self.assertRaises(SystemExit):
+            h.mod.fail(9, "途中で落ちた")
+        rb = h.sqls_like("SET state='reexamine', seen_state='remanded'")
+        self.assertEqual(len(rb), 1)
+        self.assertIn("kind='saishinri' AND created_by='run-9'", rb[0])
+        i_rb = next(i for i, s in enumerate(h.sqls) if "seen_state='remanded'" in s)
+        i_del = next(i for i, s in enumerate(h.sqls) if s.startswith("DELETE FROM drafts"))
+        self.assertLess(i_rb, i_del)
 
 
 class TestScopeSplit(unittest.TestCase):

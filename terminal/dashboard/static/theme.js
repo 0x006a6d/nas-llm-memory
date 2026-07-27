@@ -7,6 +7,14 @@
   var KEY = "nasmem.theme";
   var LITERAL = "rgba(255,255,255,.06)";
 
+  function saved() {
+    try { return localStorage.getItem(KEY) || "light"; } catch (e) { return "light"; }
+  }
+
+  // DOM を待たずに属性だけ先に立てる(ダーク選択時に初回描画でライトが一瞬見えるのを防ぐ)。
+  // DOM 依存の処理(トグル生成・apply・fixDonuts)は init 側に残す
+  document.documentElement.dataset.theme = saved();
+
   function label(t) {
     var btn = document.getElementById("themeToggle");
     if (!btn) return;
@@ -32,8 +40,7 @@
   }
 
   function init() {
-    var t = "light";
-    try { t = localStorage.getItem(KEY) || "light"; } catch (e) {}
+    var t = saved();
 
     var right = document.querySelector(".topbar-right");
     if (right) {

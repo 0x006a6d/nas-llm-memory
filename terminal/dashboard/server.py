@@ -12,6 +12,7 @@
              無いため、置換先の無い削除はこの自己参照 tombstone で表す。
   - index.md / sync-exclude.txt のファイル編集は保存前に同名 .bak へ退避。
 """
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -786,6 +787,8 @@ def codex_agents_state():
                 "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d %H:%M")}
 
     reg = load_json(HOME / ".claude-spool" / "codex-projects.json", [])
+    if not isinstance(reg, list):  # 手編集等でオブジェクト化していた場合に壊れないよう
+        reg = []
     return {
         "global": stat(HOME / ".codex" / "AGENTS.md"),
         "registry_path": str(HOME / ".claude-spool" / "codex-projects.json"),
@@ -839,8 +842,8 @@ def state():
 
 # ---------------------------------------------------------------- NAS queries
 
-def nas_batch_config():
-    """NAS のバッチ共通設定(/volume2/claude-system/batch/config.json)。無し/読めなければ None。"""
+def _nas_batch_config_text():
+    """config.json の生テキスト(書き戻し時のハッシュ照合に使う)。無し/読めなければ None。"""
     try:
         proc = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", SSH_TARGET,
@@ -848,8 +851,19 @@ def nas_batch_config():
             capture_output=True, timeout=15)
         if proc.returncode != 0:
             return None
-        return json.loads(proc.stdout.decode(errors="replace"))
+        return proc.stdout.decode(errors="replace")
     except Exception:  # noqa: BLE001
+        return None
+
+
+def nas_batch_config():
+    """NAS のバッチ共通設定(/volume2/claude-system/batch/config.json)。無し/読めなければ None。"""
+    text = _nas_batch_config_text()
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
         return None
 
 
@@ -986,6 +1000,24 @@ def fact_op(op, project, content, fact_id):
 
 # ---------------------------------------------------------------- 書架(起案・決裁文書)
 
+def _doc_no_disp(fy, seq):
+    """表示用文書番号(記憶第N号(令和X年度)。令和元年度は「元」)。
+
+    表記規則の正は nas/batch/ringi.py の display_doc_no。dashboard は
+    claude-config 側へ単体配布されるため import できず、ここにミラーする
+    (一致は tests/test_dashboard_ringi.py が ringi.py との照合で検査)。
+    UI(app.js)はこの値を表示するだけにし、年度計算を持たない。
+    """
+    n = int(fy) - 2018
+    return f"記憶第{int(seq)}号(令和{'元' if n == 1 else n}年度)"
+
+
+def _stamp_doc_no(row):
+    if row.get("fiscal_year") is not None and row.get("seq") is not None:
+        row["doc_no_disp"] = _doc_no_disp(row["fiscal_year"], row["seq"])
+    return row
+
+
 def shelf_list(filt, kind):
     """drafts一覧。filt: pending(後閲待ち)|remanded(差し戻し中)|all。"""
     if DEMO:
@@ -997,7 +1029,7 @@ def shelf_list(filt, kind):
             rows = [r for r in rows if r.get("seen_state") == "remanded"]
         if kind:
             rows = [r for r in rows if r.get("kind") == kind]
-        return rows
+        return [_stamp_doc_no(dict(r)) for r in rows]
     cond = "true"
     if filt == "pending":
         # 後閲対象 = 完結して人間がまだ見ていない文書(施行済み・廃案・後閲待ちskill)
@@ -1006,10 +1038,10 @@ def shelf_list(filt, kind):
         cond = "seen_state = 'remanded' or state = 'reexamine'"
     if kind:
         cond = f"({cond}) and kind = {dollar_quote(kind)}"
-    return sql_json(
+    return [_stamp_doc_no(r) for r in sql_json(
         "select id, doc_no, fiscal_year, seq, kind, project_key, title, state, "
         "decision_class, seen_state, created_at, decided_at, executed_at, related_doc "
-        f"from drafts where {cond} order by id desc limit 100")
+        f"from drafts where {cond} order by id desc limit 100")]
 
 
 def shelf_doc(did):
@@ -1020,11 +1052,11 @@ def shelf_doc(did):
         doc = (data.get("docs") or {}).get(str(did))
         if not doc:
             raise ValueError(f"demo文書がありません: {did}")
-        return doc
+        return _stamp_doc_no(doc)
     rows = sql_json(f"select * from drafts where id = {did}")
     if not rows:
         raise ValueError(f"文書がありません: id={did}")
-    doc = rows[0]
+    doc = _stamp_doc_no(rows[0])
     doc["log"] = sql_json(
         "select id, actor, action, memo, created_at, created_by "
         f"from draft_log where draft_id = {did} order by id")
@@ -1033,9 +1065,11 @@ def shelf_doc(did):
         "exists(select 1 from facts g where g.replaces = f.id) superseded "
         f"from draft_facts df join facts f on f.id = df.fact_id "
         f"where df.draft_id = {did} order by f.id")
+    rel = doc.get("related_doc")
     doc["related"] = sql_json(
         "select id, doc_no, kind, title, state from drafts "
-        f"where related_doc = {did} or id = coalesce({doc.get('related_doc') or 'null'}, -1) "
+        f"where related_doc = {did}"
+        + (f" or id = {int(rel)}" if rel else "") + " "
         "order by id")
     return doc
 
@@ -1047,6 +1081,8 @@ def shelf_op(op, draft_id, memo):
     approved(後閲待ちskill)→廃案。remandはメモ必須(前の担当者への指示)。
     """
     did = int(draft_id)
+    if DEMO:
+        raise RuntimeError("demo モードでは後閲操作できません")
     today = datetime.now().strftime("%Y%m%d")
     by = dollar_quote(f"dashboard-{today}")
     if op == "kouetsu":
@@ -1099,12 +1135,13 @@ CONFIG_ROLES = ("kian", "shinsa", "kessai", "enrich")
 CONFIG_RINGI_TYPES = {
     "enabled": bool, "trial": bool, "max_hosei_rounds": int, "max_kessai_rounds": int,
     "skill_min_count": int, "skill_auto_execute": bool, "index_delete_ratio": (int, float),
-    "trial_models": list,
+    "trial_models": list, "trial_budget_min": int,
 }
 # 数値設定の許容範囲(規程外の値を書いて翌晩のバッチを壊さない)
 CONFIG_RINGI_RANGE = {
     "max_hosei_rounds": (0, 10), "max_kessai_rounds": (0, 10),
     "skill_min_count": (1, 100), "index_delete_ratio": (0, 1),
+    "trial_budget_min": (1, 180),
 }
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,100}$")
 
@@ -1118,7 +1155,11 @@ def save_batch_config(body):
     """
     if DEMO:
         raise RuntimeError("demo モードでは保存できません")
-    current = nas_batch_config() or {}
+    current_text = _nas_batch_config_text()
+    try:
+        current = json.loads(current_text) if current_text is not None else {}
+    except ValueError:
+        current = {}
     if body.get("expected") is not None and body["expected"] != current:
         raise ConflictError("NASのconfig.jsonが別の場所で更新されています。"
                             "再読込してから保存し直してください")
@@ -1127,7 +1168,11 @@ def save_batch_config(body):
         m = str(body["model"] or "")
         if m and not MODEL_RE.match(m):
             raise ValueError(f"model名が不正です: {m}")
-        new["model"] = m
+        # roles と同じく、空文字は「明示的な解除」(キーを残さない)
+        if m:
+            new["model"] = m
+        else:
+            new.pop("model", None)
     if "roles" in body:
         roles = body["roles"]
         if not isinstance(roles, dict) or set(roles) - set(CONFIG_ROLES):
@@ -1162,16 +1207,40 @@ def save_batch_config(body):
             merged[k] = v
         new["ringi"] = merged
     text = json.dumps(new, ensure_ascii=False, indent=1) + "\n"
+    # 楽観ロックの本チェックはNAS側で行う: 読取りと書込みが別sshセッションだと、
+    # 並行する2つの保存がともにローカル比較を通過し、後勝ちで片方の変更が無警告に
+    # 消える。flock下で現物のsha256を照合してから差し替える(衝突は exit 109)。
+    # expectedが無い(初回等)ときは照合を省略する(従来どおり)
+    esha = ""
+    if body.get("expected") is not None:
+        esha = (hashlib.sha256(current_text.encode()).hexdigest()
+                if current_text is not None else "MISSING")
     # 同一ディレクトリの一時ファイル(名前は重ならないようmktemp)へ受け、JSONとして
     # 読めることを確かめてからmvで差し替える。転送が途中で切れても稼働中の
-    # config.jsonが半端なJSONにならない(バッチはこれを毎晩読む)
+    # config.jsonが半端なJSONにならない(バッチはこれを毎晩読む)。
+    # mktempの0600で既存の権限を潰さないよう、既存ファイルから権限を引き継ぐ
     proc = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", SSH_TARGET,
-         f"set -e; cp {BATCH_CONFIG_REMOTE} {BATCH_CONFIG_REMOTE}.bak 2>/dev/null || true; "
+         f"set -e; "
+         f"exec 9> {BATCH_CONFIG_REMOTE}.lock; flock 9; "
+         f"if [ -n '{esha}' ]; then "
+         f"  if [ '{esha}' = 'MISSING' ]; then "
+         f"    if [ -f {BATCH_CONFIG_REMOTE} ]; then echo 'config conflict' >&2; exit 109; fi; "
+         f"  else "
+         f"    cur=$(sha256sum {BATCH_CONFIG_REMOTE} 2>/dev/null | cut -d' ' -f1 || true); "
+         f"    if [ \"$cur\" != '{esha}' ]; then echo 'config conflict' >&2; exit 109; fi; "
+         f"  fi; "
+         f"fi; "
+         f"cp {BATCH_CONFIG_REMOTE} {BATCH_CONFIG_REMOTE}.bak 2>/dev/null || true; "
          f"t=$(mktemp {BATCH_CONFIG_REMOTE}.XXXXXX); trap 'rm -f \"$t\"' EXIT; "
          'cat > "$t"; python3 -c \'import json,sys; json.load(open(sys.argv[1]))\' "$t"; '
-         f'mv "$t" {BATCH_CONFIG_REMOTE}; trap - EXIT'],
+         f"if [ -f {BATCH_CONFIG_REMOTE} ]; then chmod --reference={BATCH_CONFIG_REMOTE} \"$t\"; "
+         f"else chmod 644 \"$t\"; fi; "
+         f"mv \"$t\" {BATCH_CONFIG_REMOTE}; trap - EXIT"],
         input=text.encode(), capture_output=True, timeout=15)
+    if proc.returncode == 109:
+        raise ConflictError("NASのconfig.jsonが別の場所で更新されています。"
+                            "再読込してから保存し直してください")
     if proc.returncode != 0:
         raise RuntimeError(f"書き込み失敗: {proc.stderr.decode(errors='replace')[-300:]}")
     return {"saved": True, "config": new}
@@ -1215,12 +1284,12 @@ def _nas_host():
     return host
 
 
-def _prom_query(base, expr, at=None):
+def _prom_query(base, expr, at=None, timeout=10):
     params = {"query": expr}
     if at is not None:
         params["time"] = str(at)
     url = f"{base}/api/v1/query?" + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(url, timeout=10) as r:
+    with urllib.request.urlopen(url, timeout=timeout) as r:
         data = json.load(r)
     if data.get("status") != "success":
         raise RuntimeError(f"Prometheus 応答異常: {str(data)[:300]}")
@@ -1279,16 +1348,25 @@ def usage_snapshot(hours):
         now = time.time()
         midnight = datetime.now().replace(hour=0, minute=0, second=0,
                                           microsecond=0).timestamp()
-        for i in range(min(hours // 24, 31) - 1, -1, -1):
-            day_start = midnight - i * 86400
-            day_end = min(now, day_start + 86400)
+
+        def day_cost(day_start, day_end):
+            # 当日窓は0時からの経過秒。深夜0時直後は0秒になり、Prometheusが
+            # duration 0 をパースエラーにするため1秒へ丸める
+            window = max(1, int(day_end - day_start))
             rows = _prom_query(
                 base,
                 "sum(max by (session_id, model) (max_over_time("
-                f"claude_code_cost_usage_USD_total[{int(day_end - day_start)}s])))",
-                at=day_end)
-            daily.append({"date": datetime.fromtimestamp(day_start).strftime("%m-%d"),
-                          "cost_usd": round(val(rows[0]), 4) if rows else 0.0})
+                f"claude_code_cost_usage_USD_total[{window}s])))",
+                at=day_end, timeout=4)  # 日別は短めの専用timeout(重い日の累積待機を抑える)
+            return {"date": datetime.fromtimestamp(day_start).strftime("%m-%d"),
+                    "cost_usd": round(val(rows[0]), 4) if rows else 0.0}
+
+        days = [(midnight - i * 86400, min(now, midnight - i * 86400 + 86400))
+                for i in range(min(hours // 24, 31) - 1, -1, -1)]
+        # 最大31回の逐次クエリでリクエストスレッドを長く埋めないよう並列化
+        # (mapは投入順を保つので日付順は崩れない)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            daily = list(pool.map(lambda d: day_cost(*d), days))
 
     return {
         "hours": hours,

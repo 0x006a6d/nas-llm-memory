@@ -714,8 +714,10 @@ const SHELF_KIND = { fact: "facts登載", index: "index改定", skill: "skill登
 const SHELF_SEEN = { pending: ["後閲待ち", "warn"], seen: ["後閲済", "ok"], remanded: ["差し戻し", "err"] };
 const SHELF_ACTION = { kian: "起案", hosei: "補正", shinsa_ok: "審査済(専決)", joshin: "上申",
   sashimodoshi: "差し戻し", kessai_ok: "決裁", hiketsu: "否決", shiko: "施行",
-  kouetsu: "後閲", saishinri: "再審理" };
-const docNoDisp = (r) => `記憶第${r.seq}号(令和${r.fiscal_year - 2018}年度)`;
+  kouetsu: "後閲", saishinri: "再審理", skill_mv: "git移動" };
+// 文書番号の表示形式はサーバが付ける(表記規則の正は ringi.display_doc_no。
+// 令和元年度の扱いをここに重複させない)
+const docNoDisp = (r) => r.doc_no_disp || r.doc_no;
 const chipOf = (map, key) => {
   const [label, cls] = map[key] || [key, ""];
   return `<span class="chip ${cls}">${esc(label)}</span>`;
@@ -1424,7 +1426,7 @@ function renderUsage(el) {
         <div class="stat card"><div class="n">${money(t.cost_usd)}</div><div class="l">コスト</div></div>
         <div class="stat card"><div class="n">${num(t.tokens)}</div><div class="l">トークン</div></div>
         <div class="stat card"><div class="n">${num(t.sessions)}</div><div class="l">セッション</div></div>
-        <div class="stat card"><div class="n">${(t.active_seconds / 3600).toFixed(1)}<small>h</small></div><div class="l">アクティブ時間</div></div>
+        <div class="stat card"><div class="n">${(Number(t.active_seconds ?? 0) / 3600).toFixed(1)}<small>h</small></div><div class="l">アクティブ時間</div></div>
       </div>
       <div class="ugrid">
       ${U.daily.length ? panel("日別コスト",
