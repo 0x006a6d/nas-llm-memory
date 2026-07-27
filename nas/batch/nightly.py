@@ -280,9 +280,12 @@ def fail(run_id, msg: str):
         # 補償: このrunの部分書き込み(facts・未pushの配布物)を破棄し、
         # watermarkが進まないまま翌晩やり直しても重複挿入されないようにする
         compensations = (
-            # draftsを先に消す: draft_facts/draft_logはCASCADEで消え、facts削除のFK障害を避ける
+            # draftsを先に消す: draft_facts/draft_logはCASCADEで消え、facts削除のFK障害を避ける。
+            # 施行済みのskill文書だけは残す: git pushで全端末へ配布済み(取り消せない)ため、
+            # 文書と回議録を消すと配布の根拠が残らない。他は消してよい(factsもこの後消える)
             ("drafts", lambda: psql(
-                f"DELETE FROM drafts WHERE created_by={q('run-' + str(run_id))};")
+                f"DELETE FROM drafts WHERE created_by={q('run-' + str(run_id))} "
+                f"AND NOT (kind='skill' AND state='executed');")
                 if drafts_ok() else None),
             ("facts", lambda: psql(f"DELETE FROM facts WHERE created_by={q('run-' + str(run_id))};")),
             ("repo", reset_repo),
@@ -928,12 +931,12 @@ def _actor(role: str, model: str) -> str:
 
 
 def file_draft(kind: str, key: str, title: str, proposal: str, payload,
-               run_id: int, state: str = "pending_review", related=None):
-    """起案文書の起票(採番込み)。返り値 (draft_id, doc_no)。"""
+               run_id: int, related=None):
+    """起案文書の起票(採番込み)。返り値 (draft_id, doc_no)。起票は常にpending_review。"""
     out = psql(ringi.insert_draft_sql(
         kind=kind, project_key=key, title=title, proposal=proposal, payload=payload,
         created_by=f"run-{run_id}", fy=ringi.fiscal_year(datetime.date.today()),
-        state=state, related_doc=related))
+        related_doc=related))
     did, doc_no = out.split("|")
     return int(did), doc_no
 
@@ -967,24 +970,44 @@ def judge_kessai(key: str, cases: list, model: str) -> list:
     """上申案件の決裁。cases=[(候補, 審査判定dict), ...]。返り値は同数・同順のdict列。
 
     照合対象は再取得する(施行前なのでfactsは審査時と同一。決裁者にも同じ材料を見せる)。
+    審査(_judge_with_shortlist)と同じくORGANIZE_BUDGET_CHARSでプロンプトを分割する
+    (上申案件が多い晩に1プロンプトが肥大して形式不一致→全approveへ倒れるのを防ぐ)。
+    案件番号はプロンプトごとに0から振り直し、元の順序はコード側で保つ。
     """
-    blocks = []
-    for n, (c, d) in enumerate(cases):
+    texts = []
+    for c, d in cases:
         sl = shortlist_facts(key, c["content"])
-        lines = [f"[{n}] 候補: {c['content']}",
-                 f"    審査判定: action={d.get('action')} replaces={d.get('replaces')}"
+        lines = ["    審査判定: "
+                 f"action={d.get('action')} replaces={d.get('replaces')}"
                  f" escalate={bool(d.get('escalate'))}"
                  + (f" 意見: {str(d.get('memo'))[:200]}" if d.get("memo") else ""),
                  "    照合対象:"]
         lines += [f"    [{s['id']}] {s['content']}" for s in sl] or ["    (なし)"]
-        blocks.append("\n".join(lines))
-    out = ask_claude(KESSAI_PROMPT.format(blocks="\n\n".join(blocks)),
-                     f"kessai:{key}", model=model)
-    res = extract_json(out, f"kessai:{key}")
-    if not isinstance(res, list) or len(res) != len(cases):
-        # 形式不一致の保守側: 審査案のまま承認(現行方針=取り逃さない)
-        res = [{"action": "approve"} for _ in cases]
-    return [r if isinstance(r, dict) else {"action": "approve"} for r in res]
+        texts.append((c["content"], "\n".join(lines)))
+
+    res: list = [{"action": "approve"} for _ in cases]
+    overhead = len(KESSAI_PROMPT)
+    pos = 0
+    while pos < len(texts):
+        batch, blocks, size = [], [], overhead
+        while pos < len(texts):
+            content, rest = texts[pos]
+            btext = f"[{len(batch)}] 候補: {content}\n{rest}"
+            if batch and size + len(btext) > ORGANIZE_BUDGET_CHARS:
+                break
+            batch.append(pos)
+            blocks.append(btext)
+            size += len(btext) + 2
+            pos += 1
+        out = ask_claude(KESSAI_PROMPT.format(blocks="\n\n".join(blocks)),
+                         f"kessai:{key}", model=model)
+        sub = extract_json(out, f"kessai:{key}")
+        if not isinstance(sub, list) or len(sub) != len(batch):
+            # 形式不一致の保守側: 審査案のまま承認(現行方針=取り逃さない)
+            sub = [{"action": "approve"} for _ in batch]
+        for j, i in enumerate(batch):
+            res[i] = sub[j] if isinstance(sub[j], dict) else {"action": "approve"}
+    return res
 
 
 def _execute_fact_doc(key: str, run_id: int, idxs: list, cands: list, active: list,
@@ -1233,6 +1256,13 @@ def execute_skill_doc(draft_id: int, name: str, run_id: int):
     """
     src = REPO_DIR / "skills-candidates" / name
     dst = REPO_DIR / "skills" / name
+    if dst.is_dir() and not src.exists():
+        # 前回のrunでgit mv+pushまで済み、状態遷移だけ落ちた場合の再実行。
+        # 配布は完了しているので文書の状態だけ追いつかせる
+        advance_draft(draft_id, "approved", "shiko")
+        record_draft(draft_id, "system", "shiko", run_id, memo=f"skills/{name} へ登載(施行済みを確認)")
+        log(f"  skill {name}: 施行済みを確認し状態のみ更新")
+        return
     if not src.is_dir():
         raise RuntimeError(f"skill施行: 候補 {name} が見つからない")
     if dst.exists():

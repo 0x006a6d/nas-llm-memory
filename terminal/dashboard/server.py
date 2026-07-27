@@ -345,14 +345,18 @@ def collect_skills():
     # Codex 側プラグイン(~/.codex/plugins/cache)の3層。openai-bundled = CLI 同梱の内蔵、
     # openai-primary-runtime = 実行時に取得・組み立てられるランタイム、
     # openai-curated-remote = リモート配布のプラグイン。
-    # 同一プラグインの旧バージョンが cache に残るため、バージョン昇順で走査して最後(最新)を採る
+    # 同一プラグインの旧バージョンが cache に残るため、更新時刻が最新のものを採る
+    # (バージョン名の辞書順では 0.10.0 < 0.9.0 になり旧版を掴む)
     codex_cache = Path.home() / ".codex" / "plugins" / "cache"
     for tier_dir, src in (("openai-bundled", "codex-builtin"),
                           ("openai-primary-runtime", "codex-runtime"),
                           ("openai-curated-remote", "codex-remote")):
         picked = {}
         for f in sorted(codex_cache.glob(f"{tier_dir}/*/*/skills/*/SKILL.md")):
-            picked[(f.parents[3].name, f.parent.name)] = f  # (plugin, skill名)
+            key = (f.parents[3].name, f.parent.name)  # (plugin, skill名)
+            cur = picked.get(key)
+            if cur is None or f.stat().st_mtime >= cur.stat().st_mtime:
+                picked[key] = f
         for (plugin, _name), f in sorted(picked.items()):
             real = str(f.resolve())
             if real in seen:
@@ -1067,11 +1071,14 @@ def shelf_op(op, draft_id, memo):
         action, log_memo = "kouetsu", memo or "後閲印(施行許可)"
     else:
         raise ValueError(f"unknown op: {op}")
-    if not run_sql(sql):
+    # 状態更新と回議録の記帳を1文(CTE)で行う: 更新だけ通って記帳が落ちると
+    # 後閲印や差し戻しの痕跡が残らないため
+    if not run_sql(f"with upd as ({sql.rstrip('; ')}) "
+                   "insert into draft_log (draft_id, actor, action, memo, created_by) "
+                   f"select id, 'human', {dollar_quote(action)}, "
+                   f"{dollar_quote(log_memo) if log_memo else 'null'}, {by} from upd "
+                   "returning draft_id;"):
         raise ConflictError("文書の状態が変わっています。再読込してください")
-    run_sql("insert into draft_log (draft_id, actor, action, memo, created_by) values "
-            f"({did}, 'human', {dollar_quote(action)}, "
-            f"{dollar_quote(log_memo) if log_memo else 'null'}, {by});")
     return {"ok": True}
 
 
@@ -1093,6 +1100,11 @@ CONFIG_RINGI_TYPES = {
     "enabled": bool, "trial": bool, "max_hosei_rounds": int, "max_kessai_rounds": int,
     "skill_min_count": int, "skill_auto_execute": bool, "index_delete_ratio": (int, float),
     "trial_models": list,
+}
+# 数値設定の許容範囲(規程外の値を書いて翌晩のバッチを壊さない)
+CONFIG_RINGI_RANGE = {
+    "max_hosei_rounds": (0, 10), "max_kessai_rounds": (0, 10),
+    "skill_min_count": (1, 100), "index_delete_ratio": (0, 1),
 }
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,100}$")
 
@@ -1123,7 +1135,14 @@ def save_batch_config(body):
         for k, v in roles.items():
             if not isinstance(v, str) or (v and not MODEL_RE.match(v)):
                 raise ValueError(f"roles.{k} のモデル名が不正です: {v!r}")
-        new["roles"] = {k: v for k, v in roles.items() if v}
+        # 送られたキーだけを既存へ重ねる(未送信の役割は現状維持、空文字は明示的な解除)
+        merged_roles = dict(current.get("roles") or {})
+        for k, v in roles.items():
+            if v:
+                merged_roles[k] = v
+            else:
+                merged_roles.pop(k, None)
+        new["roles"] = merged_roles
     if "ringi" in body:
         ringi = body["ringi"]
         if not isinstance(ringi, dict) or set(ringi) - set(CONFIG_RINGI_TYPES):
@@ -1136,13 +1155,21 @@ def save_batch_config(body):
             if k == "trial_models" and not all(
                     isinstance(x, str) and MODEL_RE.match(x) for x in v):
                 raise ValueError("ringi.trial_models のモデル名が不正です")
+            if k in CONFIG_RINGI_RANGE:
+                lo, hi = CONFIG_RINGI_RANGE[k]
+                if not lo <= v <= hi:
+                    raise ValueError(f"ringi.{k} は {lo}〜{hi} の範囲で指定してください: {v!r}")
             merged[k] = v
         new["ringi"] = merged
     text = json.dumps(new, ensure_ascii=False, indent=1) + "\n"
+    # 同一ディレクトリの一時ファイルへ受けてからmvで差し替える(転送が途中で切れても
+    # 稼働中のconfig.jsonが半端なJSONにならない。バッチはこれを毎晩読む)
     proc = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", SSH_TARGET,
          f"cp {BATCH_CONFIG_REMOTE} {BATCH_CONFIG_REMOTE}.bak 2>/dev/null; "
-         f"cat > {BATCH_CONFIG_REMOTE}"],
+         f"cat > {BATCH_CONFIG_REMOTE}.tmp && "
+         f"python3 -c 'import json,sys; json.load(open(sys.argv[1]))' {BATCH_CONFIG_REMOTE}.tmp && "
+         f"mv {BATCH_CONFIG_REMOTE}.tmp {BATCH_CONFIG_REMOTE}"],
         input=text.encode(), capture_output=True, timeout=15)
     if proc.returncode != 0:
         raise RuntimeError(f"書き込み失敗: {proc.stderr.decode(errors='replace')[-300:]}")

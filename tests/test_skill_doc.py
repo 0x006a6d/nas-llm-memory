@@ -149,6 +149,32 @@ class TestExecuteSkillDoc(unittest.TestCase):
         with h.ctx(), self.assertRaises(RuntimeError):
             h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
 
+    def test_already_moved_resumes_state_only(self):
+        """前晩にpushまで済み状態遷移だけ落ちた場合: gitを触らず状態のみ追いつかせる。"""
+        h = SkillHarness()
+        repo = setup_repo(h)
+        # 施行済みの形(候補は消え、skills/に入っている)
+        for p in sorted((repo / "skills-candidates" / "raster-qa").iterdir()):
+            p.unlink()
+        (repo / "skills-candidates" / "raster-qa").rmdir()
+        (repo / "skills" / "raster-qa").mkdir()
+        git_calls = []
+        with h.ctx(), mock.patch.object(h.mod.subprocess, "run",
+                                        side_effect=lambda cmd, **kw: git_calls.append(cmd)):
+            h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
+        self.assertEqual(git_calls, [])
+        self.assertTrue(h.sqls_like("executed_at=now()"))
+        self.assertIn("施行済みを確認", "\n".join(h.sqls_like("INSERT INTO draft_log")))
+
+    def test_missing_src_without_dst_still_errors(self):
+        h = SkillHarness()
+        repo = setup_repo(h)
+        for p in sorted((repo / "skills-candidates" / "raster-qa").iterdir()):
+            p.unlink()
+        (repo / "skills-candidates" / "raster-qa").rmdir()
+        with h.ctx(), self.assertRaises(RuntimeError):
+            h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
+
 
 if __name__ == "__main__":
     unittest.main()

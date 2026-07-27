@@ -19,7 +19,7 @@ class TestFiscalYear(unittest.TestCase):
     def test_display_doc_no(self):
         # 令和元年=2019年度
         self.assertEqual(ringi.display_doc_no(2026, 12), "記憶第12号(令和8年度)")
-        self.assertEqual(ringi.display_doc_no(2019, 1), "記憶第1号(令和1年度)")
+        self.assertEqual(ringi.display_doc_no(2019, 1), "記憶第1号(令和元年度)")
 
 
 class TestTransitions(unittest.TestCase):

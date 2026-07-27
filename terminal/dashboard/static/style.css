@@ -477,7 +477,7 @@ details summary { cursor: pointer; color: var(--faint); font-size: 12px; }
 .fact-gutter { width: 26px; }
 
 /* 画面幅に応じて 1〜n 列に組み替わるパネルグリッド(使用量・申し送り等) */
-.ugrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; margin-top: 20px; align-items: start; }
+.ugrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 14px; margin-top: 20px; align-items: start; }
 .upanel .section { margin: 0 0 12px; }
 .ubar { flex: 1; height: 8px; min-width: 120px; border-radius: 4px; background: rgba(0, 0, 0, 0.35); border: 1px solid var(--hairline); }
 .ubar i { display: block; height: 100%; border-radius: 4px; background: var(--amber); }

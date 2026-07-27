@@ -52,8 +52,12 @@ def reiwa(fy: int) -> int:
 
 
 def display_doc_no(fy: int, seq: int) -> str:
-    """表示用文書番号。DBのdoc_noは機械形式('2026-0012')でこちらはUI用。"""
-    return f"記憶第{seq}号(令和{reiwa(fy)}年度)"
+    """表示用文書番号。DBのdoc_noは機械形式('2026-0012')でこちらはUI用。
+
+    令和元年度は「令和1年度」ではなく「令和元年度」と書く(公用文の表記)。
+    """
+    n = reiwa(fy)
+    return f"記憶第{seq}号(令和{'元' if n == 1 else n}年度)"
 
 
 # ---------------------------------------------------------------- 状態機械
@@ -101,12 +105,14 @@ def jsonb(obj) -> str:
 
 
 def insert_draft_sql(*, kind: str, project_key: str, title: str, proposal: str,
-                     payload, created_by: str, fy: int,
-                     state: str = "pending_review", related_doc=None) -> str:
+                     payload, created_by: str, fy: int, related_doc=None) -> str:
     """起案文書の起票(採番込みの1文)。RETURNING id, doc_no。
 
-    採番は同一文内の集約で行う: 書き手はflock下のバッチのみで競合しない。
+    採番は同一文内の集約で行う: 書き手はflock下のバッチのみで競合しない
+    (UNIQUE(fiscal_year, seq) が最終防衛)。
     doc_noのlpadは4桁を下限に桁あふれでも切り詰めない(lpadは幅超過を切るため)。
+    起票の初期状態は pending_review 固定(呼び出し側から任意の状態で作らせない。
+    以後の状態は必ず transition_sql のガード付きUPDATEを通す)。
     """
     if kind not in ("fact", "skill", "index", "saishinri"):
         raise ValueError(f"invalid kind: {kind}")
@@ -116,7 +122,7 @@ def insert_draft_sql(*, kind: str, project_key: str, title: str, proposal: str,
         f"title, proposal, payload, state, related_doc, created_by) "
         f"SELECT {fy}, s.n, {fy} || '-' || lpad(s.n::text, greatest(4, length(s.n::text)), '0'), "
         f"{q(kind)}, {q(project_key)}, {q(title)}, {q(proposal)}, {jsonb(payload)}, "
-        f"{q(state)}, {rel}, {q(created_by)} "
+        f"'pending_review', {rel}, {q(created_by)} "
         f"FROM (SELECT coalesce(max(seq), 0) + 1 AS n FROM drafts WHERE fiscal_year = {fy}) s "
         f"RETURNING id, doc_no;"
     )

@@ -201,6 +201,50 @@ class TestHoseiLoop(unittest.TestCase):
         self.assertIn("取り下げ", "\n".join(h.sqls_like("INSERT INTO draft_log")))
 
 
+class TestKessaiBatching(unittest.TestCase):
+    def test_split_by_budget_keeps_order(self):
+        """上申案件が多い晩は決裁プロンプトを分割する(審査と同じバジェット)。"""
+        h = Harness(shortlist=[{"id": 41, "content": "旧事実"}])
+        cases = [(cand(f"候補{i}"), {"action": "insert", "replaces": 41}) for i in range(4)]
+        h.scripts["kessai"] = [
+            [{"action": "approve", "memo": "0"}, {"action": "approve", "memo": "1"}],
+            [{"action": "hiketsu", "memo": "2"}, {"action": "approve", "memo": "3"}],
+        ]
+        with h.ctx(), mock.patch.object(h.mod, "ORGANIZE_BUDGET_CHARS",
+                                        len(h.mod.KESSAI_PROMPT) + 200):
+            res = h.mod.judge_kessai("proj", cases, model="mo")
+        kessai_calls = [a for a in h.asks if a[0].startswith("kessai")]
+        self.assertEqual(len(kessai_calls), 2)              # 2プロンプトに分かれた
+        self.assertEqual([r["memo"] for r in res], ["0", "1", "2", "3"])  # 元の順序
+        self.assertEqual(res[2]["action"], "hiketsu")
+        # 案件番号はプロンプトごとに0から振り直す
+        for _, _, prompt in kessai_calls:
+            self.assertIn("[0] 候補:", prompt)
+
+    def test_malformed_batch_falls_back_to_approve(self):
+        h = Harness(shortlist=[{"id": 41, "content": "旧事実"}])
+        cases = [(cand(f"候補{i}"), {"action": "insert", "replaces": 41}) for i in range(2)]
+        h.scripts["kessai"] = [[{"action": "hiketsu", "memo": "件数不一致"}]]  # 2件に対し1件
+        with h.ctx():
+            res = h.mod.judge_kessai("proj", cases, model="mo")
+        self.assertEqual([r["action"] for r in res], ["approve", "approve"])
+
+
+class TestFailCompensation(unittest.TestCase):
+    def test_executed_skill_doc_survives(self):
+        """git pushで配布済みのskill文書だけは補償削除から除く。"""
+        h = Harness()
+        with h.ctx(), mock.patch.object(h.mod, "reset_repo"), self.assertRaises(SystemExit):
+            h.mod.fail(9, "途中で落ちた")
+        dels = h.sqls_like("DELETE FROM drafts")
+        self.assertEqual(len(dels), 1)
+        self.assertIn("created_by='run-9'", dels[0])
+        self.assertIn("NOT (kind='skill' AND state='executed')", dels[0])
+        # factsは従来どおりrun単位で全削除
+        self.assertTrue(any("DELETE FROM facts WHERE created_by='run-9'" in s
+                            for s in h.sqls))
+
+
 class TestScopeSplit(unittest.TestCase):
     def test_general_and_project_docs(self):
         h = Harness()

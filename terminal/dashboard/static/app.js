@@ -262,9 +262,13 @@ function deviceOf(key) {
   // 文脈により munged 形(先頭の'-'が落ちた形)でも来るので両方照合する。
   // index ディレクトリ名は munged+末尾ハッシュ(github.com-…-bloclist-fe6ac891)の
   // 形でも来るため、実キーの munged 形を前方一致で照合するフォールバックを持つ
+  // 前方一致は最長のものを採る(短いキーが並び順で先に当たると別端末を引く)
   const hit = list.find((d) => d.project_key === key) ||
     list.find((d) => d.project_key === `-${key}`) ||
-    list.find((d) => key.startsWith(keyToIndexDir(d.project_key)));
+    list.filter((d) => d.project_key)
+      .map((d) => [keyToIndexDir(d.project_key), d])
+      .sort((a, b) => b[0].length - a[0].length)
+      .find(([dir]) => dir && key.startsWith(dir))?.[1];
   return hit ? hit.device : null;
 }
 
@@ -368,10 +372,11 @@ function renderContext(el) {
   function drawList() {
     // 「このセッションに入るか」で分ける: 毎セッション注入(CLAUDE.md+general) /
     // この端末のプロジェクト(開いたときだけ注入) / 他端末(この端末には注入されない)
-    const localDev = (S.routing || {}).local_device;
+    const localDev = (S.routing || {}).local_device || "";
     const groups = [
       { label: "毎セッション注入(この端末の全セッション)", items: [] },
-      { label: `この端末(${localDev})のプロジェクト — 開いたときだけ注入`, items: [] },
+      { label: `この端末${localDev ? `(${localDev})` : ""}のプロジェクト — 開いたときだけ注入`,
+        items: [] },
       { label: "他端末のプロジェクト — この端末には注入されない", items: [] },
       { label: "帰属不明(turns 実績なし)", items: [] },
     ];
