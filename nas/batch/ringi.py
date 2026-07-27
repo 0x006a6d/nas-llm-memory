@@ -193,8 +193,10 @@ def build_title(kind: str, **kw) -> str:
 
 
 def build_proposal(kind: str, items: list, appendices: list = ()) -> str:
-    """伺い文本文。items=「記」の箇条、appendices=[(見出し, [行, ...]), ...](別記)。
+    """伺い文本文。items=「記」の箇条、appendices=[(見出し, 本文), ...](別記)。
 
+    別記の本文はリストなら番号付き箇条書き、文字列なら整形済みブロック
+    (diff等)としてそのまま載せる。
     文書番号・起案日・回議録は本文に含めない(採番は同一INSERT内、履歴の正はdraft_log。
     表示はUIが drafts/draft_log の列から組む)。
     """
@@ -202,5 +204,8 @@ def build_proposal(kind: str, items: list, appendices: list = ()) -> str:
     lines += [f"{i}. {item}" for i, item in enumerate(items, 1)]
     for n, (heading, body) in enumerate(appendices, 1):
         lines += ["", f"別記第{n}({heading})"]
-        lines += [f" {i}. {b}" for i, b in enumerate(body, 1)]
+        if isinstance(body, str):
+            lines.append(body)
+        else:
+            lines += [f" {i}. {b}" for i, b in enumerate(body, 1)]
     return "\n".join(lines) + "\n"

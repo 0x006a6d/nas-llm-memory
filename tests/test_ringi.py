@@ -197,6 +197,14 @@ class TestProposal(unittest.TestCase):
         self.assertIn("スキル「raster-qa」", ringi.build_title("skill", name="raster-qa"))
         self.assertIn("2026-0012", ringi.build_title("saishinri", doc_no="2026-0012"))
 
+    def test_appendix_as_preformatted_text(self):
+        # 別記に整形済みブロック(diff等)を文字列でそのまま載せられる
+        text = ringi.build_proposal("index", ["差分は別記第1のとおり"],
+                                    [("差分", "--- 現行\n+++ 改定案\n-旧\n+新")])
+        self.assertIn("別記第1(差分)", text)
+        self.assertIn("\n-旧\n+新", text)
+        self.assertNotIn(" 1. ---", text)  # 番号付けしない
+
     def test_ask_lines_cover_all_kinds(self):
         for kind in ("fact", "index", "skill", "saishinri"):
             self.assertIn("よろしいか", ringi.build_proposal(kind, ["x"]))

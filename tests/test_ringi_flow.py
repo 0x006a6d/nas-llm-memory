@@ -57,11 +57,17 @@ class Harness:
         kind = label.split(":")[0]
         return json.dumps(self.scripts[kind].pop(0), ensure_ascii=False)
 
+    def ctx(self):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(self.mod, "psql", side_effect=self.fake_psql))
+        stack.enter_context(mock.patch.object(self.mod, "ask_claude", side_effect=self.fake_ask))
+        stack.enter_context(mock.patch.object(
+            self.mod, "shortlist_facts", side_effect=lambda key, content, k=10: self.shortlist))
+        return stack
+
     def run(self, candidates, project="proj"):
-        with mock.patch.object(self.mod, "psql", side_effect=self.fake_psql), \
-             mock.patch.object(self.mod, "ask_claude", side_effect=self.fake_ask), \
-             mock.patch.object(self.mod, "shortlist_facts",
-                               side_effect=lambda key, content, k=10: self.shortlist):
+        with self.ctx():
             return self.mod.ringi_facts_project(project, candidates, run_id=9)
 
     # --- 検査ヘルパ
