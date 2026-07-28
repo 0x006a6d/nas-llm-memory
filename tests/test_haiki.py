@@ -189,5 +189,93 @@ class TestRingiHaiki(unittest.TestCase):
         self.assertTrue(h.sqls_like("executed_at=now()"))       # 状態だけ追いつかせる
 
 
+class TestIkanSql(unittest.TestCase):
+    def test_export_is_range_and_key_bound(self):
+        sql = kanribo.export_sql(rec(measure="ikan"))
+        self.assertIn("to_jsonb(x)", sql)
+        self.assertIn("BETWEEN 10 AND 400", sql)
+        self.assertIn("'proj'", sql)
+
+    def test_export_general_key_has_no_key_condition(self):
+        sql = kanribo.export_sql(rec(category="shuju-raw", project_key="general"))
+        self.assertIn("FROM raw_payloads", sql)
+        self.assertNotIn("= 'general'", sql)   # キーが定数の分類は範囲だけで絞る
+
+    def test_delete_after_export(self):
+        sql = kanribo.ikan_delete_sql(rec(category="kessai-doc", location="DB drafts"))
+        self.assertIn("DELETE FROM drafts", sql)
+        self.assertIn("BETWEEN 10 AND 400", sql)
+
+    def test_archive_path_is_year_scoped_and_safe(self):
+        p = kanribo.archive_path(rec(category="kessai-doc", project_key="github.com/x/y"))
+        self.assertEqual(p, "2026/kessai-doc_github.com-x-y_2026.jsonl.gz")
+
+
+class IkanHarness(HaikiHarness):
+    def __init__(self, archive_dir, **kw):
+        kw.setdefault("files", [rec(category="kessai-doc", measure="ikan",
+                                    location="DB drafts", name="決裁文書 proj 令和8年度")])
+        kw.setdefault("rules", [{"category": "kessai-doc", "measure": "ikan",
+                                 "gate": "sokujiko", "retention_days": 0,
+                                 "retention_years": 10}])
+        super().__init__(**kw)
+        self.mod.ARCHIVE_DIR = archive_dir
+        self.rows = [{"id": 11, "content": "決裁の中身", "created_at": "2026-04-02"},
+                     {"id": 12, "content": "その2", "created_at": "2026-04-03"}]
+
+    def fake_psql(self, sql):
+        if "to_jsonb(x)" in sql:
+            self.sqls.append(sql)
+            return json.dumps(self.rows, ensure_ascii=False)
+        return super().fake_psql(sql)
+
+    def run_ikan(self):
+        with self.ctx(), mock.patch.object(self.mod, "backup_is_fresh",
+                                           return_value=self.fresh):
+            return self.mod.ringi_ikan(run_id=9)
+
+
+class TestRingiIkan(unittest.TestCase):
+    def setUp(self):
+        import tempfile, shutil
+        self.dir = Path(tempfile.mkdtemp(prefix="archive-test-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def test_export_then_delete_and_roundtrip(self):
+        """移管は中身を書き出してからDBを外す。書き出しは読み戻せる。"""
+        h = IkanHarness(self.dir)
+        h.scripts["kessai-ikan"] = [{"action": "approve", "memo": "移管可"}]
+        self.assertEqual(h.run_ikan(), 1)
+        out = self.dir / "2026" / "kessai-doc_proj_2026.jsonl.gz"
+        self.assertTrue(out.is_file())
+        import gzip
+        got = [json.loads(x) for x in
+               gzip.open(out, "rt", encoding="utf-8").read().splitlines()]
+        self.assertEqual(got, h.rows)                 # 往復して一致
+        self.assertTrue(h.sqls_like("DELETE FROM drafts"))
+        self.assertIn("state = 'ikan_zumi'", "\n".join(h.sqls_like("UPDATE record_files")))
+        self.assertNotIn(".tmp", "".join(str(p) for p in self.dir.rglob("*")))
+
+    def test_hiketsu_keeps_rows_in_db(self):
+        h = IkanHarness(self.dir)
+        h.scripts["kessai-ikan"] = [{"action": "hiketsu", "memo": "まだ置く"}]
+        h.run_ikan()
+        self.assertEqual(h.sqls_like("DELETE FROM drafts"), [])
+        self.assertTrue(h.sqls_like("state='rejected'"))
+
+    def test_kouetsu_gate_stops_before_delete(self):
+        h = IkanHarness(self.dir, rules=[{"category": "kessai-doc", "measure": "ikan",
+                                          "gate": "kouetsu", "retention_days": 0,
+                                          "retention_years": 10}])
+        h.scripts["kessai-ikan"] = [{"action": "approve", "memo": "移管可"}]
+        h.run_ikan()
+        self.assertEqual(h.sqls_like("DELETE FROM drafts"), [])   # 後閲印待ち
+        self.assertTrue(h.sqls_like("decision_class='bucho'"))
+
+    def test_haiki_files_are_not_migrated(self):
+        h = IkanHarness(self.dir, files=[rec(measure="haiki")])
+        self.assertEqual(h.run_ikan(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

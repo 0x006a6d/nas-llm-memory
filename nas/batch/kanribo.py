@@ -281,6 +281,54 @@ def haiki_items(f: dict, survivors: int = 0) -> list:
     return items
 
 
+# ---------------------------------------------------------------- 移管(法8条1項)
+
+def export_sql(f: dict) -> str:
+    """移管するファイルの中身を1行1JSONで取り出すSQL。
+
+    廃棄と違い中身を残すので、行をそのまま(列名つきで)書き出す。
+    範囲は管理簿の id_from〜id_to と中分類に限定する。
+    """
+    cat = f["category"]
+    src = SOURCES[cat]
+    key_expr = src["key"].replace("to_project", "x.to_project") \
+        if "to_project" in src["key"] else src["key"]
+    cond = f"x.id BETWEEN {int(f['id_from'])} AND {int(f['id_to'])}"
+    if key_expr != "'general'":
+        cond += f" AND {key_expr.replace('project_key', 'x.project_key')} = {q(f['project_key'])}"
+    return (f"SELECT json_agg(to_jsonb(x) ORDER BY x.id) FROM {src['table']} x "
+            f"WHERE {cond};")
+
+
+def ikan_delete_sql(f: dict) -> str:
+    """移管後にDBから外すSQL(中身はアーカイブ領域に残っている)。"""
+    src = SOURCES[f["category"]]
+    key_expr = src["key"].replace("to_project", "x.to_project") \
+        if "to_project" in src["key"] else src["key"]
+    cond = f"x.id BETWEEN {int(f['id_from'])} AND {int(f['id_to'])}"
+    if key_expr != "'general'":
+        cond += f" AND {key_expr.replace('project_key', 'x.project_key')} = {q(f['project_key'])}"
+    return (f"WITH d AS (DELETE FROM {src['table']} x WHERE {cond} RETURNING x.id) "
+            f"SELECT count(*) FROM d;")
+
+
+def archive_path(f: dict) -> str:
+    """移管先(アーカイブ領域)の相対パス。年度で切ってファイル名は管理簿と対応させる。"""
+    safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in str(f["project_key"]))
+    return f"{fiscal_year_of(f['period'])}/{f['category']}_{safe}_{f['period']}.jsonl.gz"
+
+
+def ikan_items(f: dict, path: str, n: int, sha: str) -> list:
+    """移管伺いの「記」の箇条。"""
+    return [
+        f"分類 {f['category']}・ファイル「{f['name']}」を移管する",
+        f"保存期間は満了日 {str(f.get('expires_on') or '')[:10]} をもって満了している",
+        f"対象は{n}件(id {f['id_from']}〜{f['id_to']}、保存場所 {f['location']})",
+        f"移管先は archive/{path}(sha256 {sha[:16]}…)",
+        "移管後はDBから外すが、中身はアーカイブ領域に保存し復元できる",
+    ]
+
+
 # ---------------------------------------------------------------- 点検・報告(法9条)
 
 def tenken_sql() -> str:
