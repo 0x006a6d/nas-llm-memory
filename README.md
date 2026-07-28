@@ -106,6 +106,17 @@ OpenAI Codex CLI のセッションも同じ経路に載る (`docs` の追補設
 - 配布 — sender が general index を `~/.codex/AGENTS.md` のマーカー区切り管理セクション (`nas-memory:begin/end`) に展開する。手書き本文には触れない
 - 制約 — プロジェクト単位の注入は未実装。codex 0.144.1 は `<project>/.codex/AGENTS.md` を読まず (実機検証)、commit 対象の AGENTS.md 本体へ index を展開すると記憶がリポジトリに漏れるため
 
+## opencode 対応
+
+opencode (kimi 等を動かす CLI) のセッションも同じ経路に載る。opencode は JSONL ではなく SQLite に持つので、収集はファイル走査ではなく DB の読み取りになる。
+
+- 収集 — sender が `~/.local/share/opencode/opencode.db` (`XDG_DATA_HOME` 尊重、`OPENCODE_DB` で上書き可) を読み取り専用で開き、`session` / `message` / `part` の3表から message 1 件 = JSONL 1 行に組み直して送る。**増分送信**: セッションごとに送信済みの最大 `message.time_created` を `~/.claude-spool/opencode-sent.jsonl` に記録し、それより新しい message だけを送る。書きかけの応答を取り込まないよう、最終更新が 5 分以内の message は次回に回す
+- 蒸留 — ingest が `agent='opencode'` の turns に正規化する。`message_uuid` は opencode の message.id (DB 全体で一意) をそのまま使うので再送しても重複しない。part のうち text / tool (呼び出しと結果) / subtask を本文に落とし、reasoning は Claude Code の thinking と同じく保存しない。`originator` にはエージェント種別 (build / plan 等) が入る
+- 除外 — セッションの作業ディレクトリで sync-exclude.txt を適用する (Codex と同じく hook 経路ではないので `NAS_MEMORY_DISABLE` は効かない)
+- 配置順 — ingest を先に更新すること。未対応の ingest は `agent='opencode'` を 400 で拒否し、送信ループは最初の失敗で打ち切るためスプールが滞留する
+
+新しいツールを収集対象に加えるときは、この 2 か所 (sender の走査 + ingest のパーサ) を足す。保存形式がツールごとに違うため共通化はしていない。
+
 ## 初回データ移行 (バックフィル)
 
 定常経路は「今後発生するログ」のみを扱う。既存の過去ログは稼働開始の最初期に一度だけ流し込む (Claude Code のローカル保持期間で古いセッションから消えるため、遅らせない)。詳細は `docs/backfill.md`。
