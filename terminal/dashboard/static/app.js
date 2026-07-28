@@ -12,17 +12,18 @@ let N = null;   // /api/nas
 let factsCache = {};   // project -> rows
 
 // パイプライン順: 収集 → 記録 → 蒸留(スキル/Hooks) → 配布(コンテキスト/routing) → 申し送り
+// タブ名は公文書事務の語に揃える(スキル/Hooks は固有名詞なのでそのまま)
 const TABS = {
-  overview: "概要",
-  collect: "収集",
-  facts: "記録 (facts)",
-  shelf: "書架 (決裁)",
+  overview: "文書事務概況",
+  collect: "収受簿",
+  facts: "事実原簿",
+  shelf: "書庫 (決裁済)",
   skills: "スキル",
   hooks: "Hooks",
-  context: "コンテキスト",
-  routing: "配布",
-  messages: "申し送り",
-  usage: "使用量",
+  context: "例規 (常用文書)",
+  routing: "配付先",
+  messages: "事務引継",
+  usage: "予算執行",
 };
 
 async function j(url, opts) {
@@ -140,7 +141,7 @@ function warnings() {
   if (sc.length) out.push({ kind: "info", tag: "スキル候補",
     text: `未採用のスキル候補が ${sc.length} 件あります(スキルタブで確認。採用するときはセッションで「◯◯ を採用して」)。` });
   if (N.shelf_pending) out.push({ kind: "info", tag: "後閲待ち",
-    text: `後閲待ちの決裁文書が ${N.shelf_pending} 件あります(書架タブで後閲印または差し戻し)。` });
+    text: `後閲待ちの決裁文書が ${N.shelf_pending} 件あります(書庫タブで後閲印または差し戻し)。` });
   const B = S.builtin || {};
   if (B.captured_with && B.current_version && B.captured_with !== B.current_version) {
     out.push({ kind: "info", tag: "内蔵一覧が古い",
@@ -177,7 +178,7 @@ function renderOverview(el) {
     <div class="numhd"><span class="no">00</span><span class="lb">全体の流れ — このシステムがやっていること</span></div>
     <div class="pipeline">
       <a class="pstage" href="#collect">
-        <div class="pt">収集</div>
+        <div class="pt">収受</div>
         <div class="pd">全端末の claude/codex セッションを hook が spool に書き、NAS の turns(生ログ)へ送る</div>
         <div class="pn">${num(turnsTotal)} turns</div>
       </a><span class="parrow">→</span>
@@ -192,12 +193,12 @@ function renderOverview(el) {
         <div class="pn">${S.memory_indexes.length} index</div>
       </a><span class="parrow">→</span>
       <a class="pstage" href="#routing">
-        <div class="pt">配布・注入</div>
+        <div class="pt">配付・注入</div>
         <div class="pd">routing 宣言に従い端末×プロジェクトのセッション冒頭へ注入。general は全端末・毎セッション</div>
         <div class="pn">${routedN} 宣言</div>
       </a>
     </div>
-    <div class="note info"><span class="tag">直し方</span><span>恒久的に直す → 「記録 (facts)」タブで facts を修正。繰り返し作業を固定化 → スキル/Hooks タブ。後で見返す会話 → 記録タブでフラグ。index の直接編集は翌バッチで上書きされる一時措置です。</span></div>
+    <div class="note info"><span class="tag">直し方</span><span>恒久的に直す → 「事実原簿」タブで facts を修正。繰り返し作業を固定化 → スキル/Hooks タブ。後で見返す会話 → 事実原簿タブでフラグ。index の直接編集は翌バッチで上書きされる一時措置です。</span></div>
 
     <div class="numhd"><span class="no">01</span><span class="lb">毎セッション注入されるコンテキスト</span></div>
     <div class="budget-total">
@@ -237,11 +238,11 @@ function renderOverview(el) {
     <div class="numhd"><span class="no">04</span><span class="lb">プロジェクト別の蓄積</span></div>
     <div class="card">
       <table>
-        <tr><th>project_key<span class="faint" style="font-weight:400">(タグ=主に使う端末。クリックで配布タブへ)</span></th><th style="text-align:right">turns</th><th style="text-align:right">facts</th><th>最終収集</th></tr>
+        <tr><th>project_key<span class="faint" style="font-weight:400">(タグ=主に使う端末。クリックで配付先タブへ)</span></th><th style="text-align:right">turns</th><th style="text-align:right">facts</th><th>最終収受</th></tr>
         ${N.turns_by_project.map((r) => {
           const f = N.facts_by_project.find((x) => x.project_key === r.project_key ||
             x.project_key === keyToIndexDir(r.project_key));
-          return `<tr><td class="mono"><a class="plink" href="#routing" title="配布タブで、このプロジェクトの index がどの端末に注入されるかを確認・変更">${keyLabel(r.project_key)}</a></td>
+          return `<tr><td class="mono"><a class="plink" href="#routing" title="配付先タブで、このプロジェクトの index がどの端末に注入されるかを確認・変更">${keyLabel(r.project_key)}</a></td>
             <td class="num">${num(r.n)}</td>
             <td class="num">${f ? num(f.n) : "·"}</td>
             <td class="faint mono">${esc(String(r.last_ts || "").slice(0, 16).replace("T", " "))}</td></tr>`;
@@ -314,7 +315,7 @@ function attachLineNumbers(ta, gutter) {
   update();
 }
 
-/* Codex への index 配布物の状態表(コンテキストタブ)。Codex には @include 構文が
+/* Codex への index 配布物の状態表(例規タブ)。Codex には @include 構文が
    無いため、agents_sync.py(sender 実行時)が index をファイルに直接展開する。 */
 function codexAgentsHtml() {
   const C = S.codex_agents;
@@ -330,7 +331,7 @@ function codexAgentsHtml() {
   const g = C.global;
   return `
     <h2 class="section">Codex 側配布(AGENTS.md 管理セクション / AGENTS.override.md)</h2>
-    <div class="note info"><span class="tag">仕組み</span><span>Codex には @include 構文が無いため、hooks/agents_sync.py(sender 実行時 = SessionStart+毎時)が記憶 index をファイルに直接展開して配布します。グローバルは ~/.codex/AGENTS.md のマーカー区切り管理セクション、プロジェクトは「手書き AGENTS.md 全文 + そのプロジェクトの index」を結合した AGENTS.override.md(git 追跡外)。ここは生成状態の確認のみで、編集は手書き AGENTS.md か「記憶 (facts)」へ。プロジェクトの登録は <span class="mono">agents_sync.py register</span>(一覧: ${esc(C.registry_path)})。</span></div>
+    <div class="note info"><span class="tag">仕組み</span><span>Codex には @include 構文が無いため、hooks/agents_sync.py(sender 実行時 = SessionStart+毎時)が記憶 index をファイルに直接展開して配布します。グローバルは ~/.codex/AGENTS.md のマーカー区切り管理セクション、プロジェクトは「手書き AGENTS.md 全文 + そのプロジェクトの index」を結合した AGENTS.override.md(git 追跡外)。ここは生成状態の確認のみで、編集は手書き AGENTS.md か「事実原簿」へ。プロジェクトの登録は <span class="mono">agents_sync.py register</span>(一覧: ${esc(C.registry_path)})。</span></div>
     <div class="card"><table>
       <tr><th>対象</th><th>手書き AGENTS.md</th><th>配布物</th></tr>
       <tr>
@@ -357,7 +358,7 @@ function renderContext(el) {
     })),
   ];
   el.innerHTML = `
-    <div class="note warn"><span class="tag">前提</span><span>index.md は夜間バッチ(03:00)が current_facts から全再生成します。ここでの直接編集は即座に反映されますが翌バッチで上書きされます。恒久的に直したい内容は「記憶 (facts)」タブで facts を修正してください。</span></div>
+    <div class="note warn"><span class="tag">前提</span><span>index.md は夜間バッチ(03:00)が current_facts から全再生成します。ここでの直接編集は即座に反映されますが翌バッチで上書きされます。恒久的に直したい内容は「事実原簿」タブで facts を修正してください。</span></div>
     <div class="note info"><span class="tag">凡例</span><span>一覧は claude-config/memory/ 配下の全端末・全プロジェクト分の実ファイルで、<b>全部が読み込まれるわけではありません</b>。1セッションに注入されるのは「CLAUDE.md + general」と、そのプロジェクトで開いたときのそのプロジェクトの index 1本だけ(routing 宣言に従う)。<span class="chip amber">auto</span> = 夜間バッチが再生成するファイル。<span class="devtag">端末名</span> = そのプロジェクトを主に使っている端末(会話履歴 turns からの推定)。</span></div>
     <div class="split" style="margin-top:14px">
       <div class="card filelist" id="ctxList"></div>
@@ -702,7 +703,7 @@ function renderFacts(el) {
   drawAutoMemory();
 }
 
-/* ---------------- 書架(起案・決裁文書) ---------------- */
+/* ---------------- 書庫(起案・決裁文書) ---------------- */
 
 const SHELF_STATE = {
   pending_review: ["審査中", "blue"], remanded_to_drafter: ["補正中", "warn"],
@@ -1144,7 +1145,7 @@ function renderHooks(el) {
 
 function renderCollect(el) {
   el.innerHTML = `
-    <div class="note info"><span class="tag">このタブ</span><span>パイプラインの収集段の管理と健全性確認です。各端末の hook がセッションを spool(ローカル送信待ちキュー ~/.claude-spool)に書き、NAS の turns へ送ります。ここでは収集から除外するもの(sync-exclude)、NAS 側夜間バッチの実行状況、端末側 hook スクリプト、配布リポジトリの状態を確認します。</span></div>
+    <div class="note info"><span class="tag">このタブ</span><span>パイプラインの収受段の管理と健全性確認です。各端末の hook がセッションを spool(ローカル送信待ちキュー ~/.claude-spool)に書き、NAS の turns へ送ります。ここでは収受から除外するもの(sync-exclude)、NAS 側夜間バッチの実行状況、端末側 hook スクリプト、配布リポジトリの状態を確認します。</span></div>
     <h2 class="section">収集除外 sync-exclude.txt(全端末に配布・手動管理で安全に編集可)</h2>
     <div class="card">
       <div class="toolrow"><span class="faint">${esc(S.sync_exclude.path)}</span>
@@ -1165,7 +1166,7 @@ function renderCollect(el) {
     <div class="card"><code class="block">${esc(S.crontab)}</code></div>
 
     <h2 class="section">バッチ実行履歴(直近${N.batch_runs.length}件)</h2>
-    <div class="note info"><span class="tag">読み方</span><span>時刻は UTC(KST−9時間)。ロック敗退や cron 起動失敗はここに row を残さず「時間が来ても行が増えない」形で現れます — その検知は概要タブの注意欄(未記録・成功が古い・滞留)が担当します。</span></div>
+    <div class="note info"><span class="tag">読み方</span><span>時刻は UTC(KST−9時間)。ロック敗退や cron 起動失敗はここに row を残さず「時間が来ても行が増えない」形で現れます — その検知は文書事務概況タブの注意欄(未記録・成功が古い・滞留)が担当します。</span></div>
     <div class="card"><table>
       <tr><th>run</th><th>種別</th><th>開始</th><th>終了</th><th>状態</th><th style="text-align:right">turns処理</th><th style="text-align:right">index行</th><th>メモ</th></tr>
       ${N.batch_runs.map((b) => `<tr>
