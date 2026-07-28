@@ -475,6 +475,24 @@ def seiri(run_id: int) -> int:
     return total
 
 
+def check_manryou(run_id: int) -> list:
+    """満了の検出。保存期間が満了したファイルを現用→満了に進める。
+
+    ここでは消さない(廃棄・移管は決裁を経る別処理)。措置は記載時に確定済み。
+    返り値: 満了に進めたファイルの一覧。
+    """
+    if not kanribo_ok():
+        return []
+    done = psql_json(kanribo.manryou_sql()) or []
+    for f in done:
+        log(f"  満了: {f['name']} ({f['n_rows']}件) → 措置 "
+            f"{kanribo.MEASURE_LABEL.get(f['measure'], f['measure'])}")
+    soon = psql(kanribo.manryou_soon_sql())
+    if soon and int(soon) > len(done):
+        log(f"  満了予定(30日以内): {int(soon) - len(done)}ファイル")
+    return done
+
+
 _EDGES_OK = None
 
 
@@ -2094,6 +2112,7 @@ def main(trial: bool = False):
         # 収集や蒸留とは独立なので、失敗しても本体パイプラインへ波及させない
         try:
             seiri(run_id)
+            check_manryou(run_id)
         except Exception as exc:
             log(f"  WARN 整理: {type(exc).__name__}: {exc}")
 

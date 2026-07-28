@@ -161,6 +161,43 @@ def upsert_sql(category: str, rule: dict, row: dict) -> str:
     )
 
 
+def manryou_sql() -> str:
+    """満了したファイルの状態を現用→満了に進める(法5条のレコードスケジュールの実行段)。
+
+    満了日を過ぎた現用ファイルだけを対象にする。措置(廃棄/移管)は記載時に
+    確定済みなので、ここでは判断しない。返り値は状態を進めた行。
+    """
+    return (
+        "WITH upd AS ("
+        "UPDATE record_files SET state = 'manryou', updated_at = now() "
+        "WHERE state = 'genyou' AND expires_on IS NOT NULL "
+        "AND expires_on <= current_date RETURNING id, category, name, measure, n_rows) "
+        "SELECT json_agg(json_build_object('id', id, 'category', category, 'name', name, "
+        "'measure', measure, 'n_rows', n_rows) ORDER BY id) FROM upd;"
+    )
+
+
+def manryou_soon_sql(days: int = 30) -> str:
+    """満了が近いファイル(既定30日以内)。点検・注意喚起用。"""
+    return (
+        f"SELECT count(*) FROM record_files WHERE state = 'genyou' "
+        f"AND expires_on IS NOT NULL "
+        f"AND expires_on <= current_date + {int(days)};"
+    )
+
+
+def pending_measure_sql() -> str:
+    """満了済みで、まだ廃棄・移管の文書が起票されていないファイル。"""
+    return (
+        "SELECT json_agg(json_build_object('id', id, 'category', category, "
+        "'project_key', project_key, 'name', name, 'period', period, "
+        "'expires_on', expires_on, 'measure', measure, 'location', location, "
+        "'n_rows', n_rows, 'id_from', id_from, 'id_to', id_to) ORDER BY expires_on, id) "
+        "FROM record_files WHERE state = 'manryou' AND disposed_draft IS NULL "
+        "AND measure <> 'jouyou';"
+    )
+
+
 def rules_sql() -> str:
     """有効な保存期間基準(規程)を読む。"""
     return (

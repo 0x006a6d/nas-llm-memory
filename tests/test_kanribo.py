@@ -192,5 +192,62 @@ class TestSeiri(unittest.TestCase):
             self.assertEqual(h.mod.seiri(run_id=9), 0)
 
 
+class TestManryou(unittest.TestCase):
+    def test_manryou_sql_only_touches_expired_genyou(self):
+        sql = kanribo.manryou_sql()
+        self.assertIn("SET state = 'manryou'", sql)
+        self.assertIn("WHERE state = 'genyou'", sql)
+        self.assertIn("expires_on <= current_date", sql)
+        self.assertIn("expires_on IS NOT NULL", sql)   # 常用は満了しない
+
+    def test_pending_measure_excludes_jouyou_and_already_filed(self):
+        sql = kanribo.pending_measure_sql()
+        self.assertIn("state = 'manryou'", sql)
+        self.assertIn("disposed_draft IS NULL", sql)   # 起票済みは二重に出さない
+        self.assertIn("measure <> 'jouyou'", sql)
+
+    def test_soon_window(self):
+        self.assertIn("current_date + 30", kanribo.manryou_soon_sql())
+        self.assertIn("current_date + 7", kanribo.manryou_soon_sql(7))
+
+
+class ManryouHarness(SeiriHarness):
+    def __init__(self, done=None, soon="0", **kw):
+        super().__init__(**kw)
+        self.done = done or []
+        self.soon = soon
+
+    def fake_psql(self, sql):
+        if "SET state = 'manryou'" in sql:
+            self.sqls.append(sql)
+            return json.dumps(self.done, ensure_ascii=False)
+        if "current_date +" in sql:
+            self.sqls.append(sql)
+            return self.soon
+        return super().fake_psql(sql)
+
+    def run_check(self):
+        with self.ctx():
+            return self.mod.check_manryou(run_id=9)
+
+
+class TestCheckManryou(unittest.TestCase):
+    def test_expired_files_are_marked(self):
+        h = ManryouHarness(done=[{"id": 3, "category": "shuju-raw", "name": "収受(生データ) general 令和8年度4月",
+                                  "measure": "haiki", "n_rows": 412}], soon="2")
+        out = h.run_check()
+        self.assertEqual([f["id"] for f in out], [3])
+        self.assertTrue(h.sqls_like("SET state = 'manryou'"))
+
+    def test_nothing_expired(self):
+        h = ManryouHarness(done=[], soon="0")
+        self.assertEqual(h.run_check(), [])
+
+    def test_schema_absent_is_noop(self):
+        h = ManryouHarness(kanribo_ok=False)
+        with mock.patch.object(h.mod, "psql", side_effect=h.fake_psql):
+            self.assertEqual(h.mod.check_manryou(run_id=9), [])
+
+
 if __name__ == "__main__":
     unittest.main()
