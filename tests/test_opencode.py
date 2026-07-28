@@ -162,6 +162,32 @@ class TestSpoolOpencode(unittest.TestCase):
         self.assertEqual(sorted(got), sorted(f"msg_{i}" for i in range(5)))  # 全件そろう
         self.assertEqual(len(got), len(set(got)))                            # 重複しない
 
+    def test_streaming_parts_defer_the_message(self):
+        """message行が据え置きでもpartが更新中なら書きかけ扱いにする。
+
+        実測した取りこぼし: 1時間半かかった応答は message.time_updated が
+        開始時刻のまま part だけが伸び続けたため、本文が空の状態で送られ
+        (パーサは行を作らない)、透かしだけ進んで永久に欠落した。
+        """
+        make_db(self.db,
+                messages=[msg("msg_1", 1_000, "assistant", updated=1_000)],  # 行は据え置き
+                parts=[part("prt_1", "msg_1", 1_000, {"type": "reasoning", "text": "考え中"})])
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE part SET time_updated = 9_999_000 WHERE id='prt_1'")  # 執筆中
+        con.commit(); con.close()
+        self.assertEqual(self.run_scan(now=10_000.0), [])          # 送らない
+        self.assertFalse((self.home / ".claude-spool" / "opencode-sent.jsonl").exists())
+        # 応答が完成したら本文ごと送られる
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE part SET time_updated = 1000 WHERE id='prt_1'")
+        con.execute("INSERT INTO part VALUES (?,?,?,?,?,?)",
+                    part("prt_2", "msg_1", 1_100, {"type": "text", "text": "書き上がった本文"}))
+        con.commit(); con.close()
+        files = self.run_scan(now=10_000.0)
+        self.assertEqual(len(files), 1)
+        payload = json.loads(files[0].read_text(encoding="utf-8"))
+        self.assertIn("書き上がった本文", payload["transcript"])
+
     def test_excluded_project_is_not_spooled_but_watermarked(self):
         make_db(self.db, directory="/tmp/secret",
                 messages=[msg("msg_1", 1_000_000, "user")],

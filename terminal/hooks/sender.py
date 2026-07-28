@@ -312,22 +312,23 @@ def spool_opencode():
         for s in sessions:
             sid = s["id"]
             wm = state.get(sid, 0)
-            # 書きかけ(最終更新が新しい)messageの最古の作成時刻。透かしはここを越えない。
-            # time_updatedがNULLの行はtime_createdで代用する(恒久除外を作らない)
-            pending_ms = con.execute(
-                "SELECT min(time_created) FROM message WHERE session_id = ? "
-                "AND time_created > ? AND coalesce(time_updated, time_created) > ?",
-                (sid, wm, cutoff_ms)).fetchone()[0]
-            args = [sid, wm, cutoff_ms]
-            limit_sql = ""
-            if pending_ms is not None:
-                limit_sql = "AND time_created < ? "
-                args.append(pending_ms)
-            msgs = list(con.execute(
-                "SELECT id, time_created, time_updated, data FROM message "
-                "WHERE session_id = ? AND time_created > ? "
-                "AND coalesce(time_updated, time_created) <= ? " + limit_sql +
-                "ORDER BY time_created, id", args))
+            # 書きかけ判定は message と part の両方の最終更新を見る。長いターンの間、
+            # opencode は part だけを更新して message 行を据え置くことがあり、
+            # message.time_updated だけで見ると「本文がまだ書かれていない応答」を
+            # 空のまま送って透かしだけ進めてしまう(実測: 1時間半のターンを取りこぼした)。
+            # time_updated が NULL の行は time_created で代用する(恒久除外を作らない)
+            rows = list(con.execute(
+                "SELECT m.id, m.time_created, m.data, "
+                "max(coalesce(m.time_updated, m.time_created), "
+                "    coalesce((SELECT max(p.time_updated) FROM part p "
+                "              WHERE p.message_id = m.id), 0)) AS last_activity "
+                "FROM message m WHERE m.session_id = ? AND m.time_created > ? "
+                "ORDER BY m.time_created, m.id", (sid, wm)))
+            # 書きかけの最古の作成時刻。透かしはここを越えない(越えると保留分が永久に残る)
+            pending_ms = min((r["time_created"] for r in rows
+                              if r["last_activity"] > cutoff_ms), default=None)
+            msgs = [r for r in rows if r["last_activity"] <= cutoff_ms
+                    and (pending_ms is None or r["time_created"] < pending_ms)]
             if not msgs:
                 continue
             cwd = s["directory"] or None
