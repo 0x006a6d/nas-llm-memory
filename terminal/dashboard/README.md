@@ -32,9 +32,16 @@ NAS への問い合わせは `ssh nas`(~/.ssh/config)経由。NAS 系データ�
 - 記録 (facts) — current_facts の閲覧と 追加/修正/撤去、turns の PGroonga 全文検索、
                  重要な会話のフラグ付け(NAS flags テーブル、session_id 単位、全端末共通)、
                  auto memory スナップショット(各端末の内蔵メモリ取り込み履歴)の閲覧
+- 書架 (決裁)  — 起案・決裁ワークフロー(ringi)の完結文書の閲覧と後閲。文書番号・決裁欄・
+                 伺い文・回議録・登載 facts を表示し、後閲印またはメモ付き差し戻し
+                 (差し戻しは翌晩の便で決裁者が再審理)。skill 文書は後閲印が施行の条件。
+                 専決規程(NAS batch/config.json の roles / ringi 主要フラグ)の編集も
+                 このタブ(保存時に .bak 退避、反映は翌晩のバッチから)
 - スキル       — /context に出る構成要素の一覧を出所別に表示:
                  スキル(user / claude-config / codex ~/.codex/skills / 各プロジェクト
-                 .claude/skills / プラグイン)、コマンド(commands/*.md)、
+                 .claude/skills / プラグイン / Codex プラグイン3層 ~/.codex/plugins/cache
+                 の openai-bundled=内蔵・openai-primary-runtime=実行時ランタイム・
+                 openai-curated-remote=リモート)、コマンド(commands/*.md)、
                  エージェント(agents/*.md)、Claude Code 内蔵(builtin-context.json の
                  手動スナップショット。バイナリ埋め込みで列挙不可のため、claude の
                  バージョンが変わると要更新の注意を出す)。各項目に編集可否を明示。
@@ -45,10 +52,17 @@ NAS への問い合わせは `ssh nas`(~/.ssh/config)経由。NAS 系データ�
                  (実処理は hooks/hooks_apply.py。SessionStart でも自動適用)。
                  加えて settings.json・各プラグイン・~/.codex/hooks.json の実登録を
                  イベント別に集約表示。コンテキスト注入 hook は本文を琥珀枠で表示
-- コンテキスト — CLAUDE.md と memory/*/index.md の閲覧・編集(バイトゲージ付き)
+- コンテキスト — CLAUDE.md と memory/*/index.md の閲覧・編集(バイトゲージ付き)。
+                 一覧は「毎セッション注入 / この端末のプロジェクト / 他端末」に
+                 グループ分け。Codex 側配布(~/.codex/AGENTS.md 管理セクションと
+                 各登録プロジェクトの AGENTS.override.md)の生成状態表も出す
 - 配布         — routing.json の端末×プロジェクト マトリクス編集(どの端末にどの
                  プロジェクトの index を注入するか)
 - 申し送り     — 端末/プロジェクト宛の一度きりのメッセージ送信と履歴
+- 使用量       — Claude Code のテレメトリ集計(コスト/トークン/セッション/日別・端末別・
+                 モデル別)。各端末が OTLP で NAS の otel-collector に送り、NAS の
+                 Prometheus(9090)に保存されたものを HTTP API で集計する。ホストは
+                 ~/.claude-spool/config.json の ingest_url から導出(IP はコードに置かない)
 
 ## 編集の意味論(重要)
 

@@ -10,6 +10,7 @@
 # (前段が失敗しても後段は走る)。nightly(実測12〜28分)には1時間の余裕を見る。
 
 # 夜間統合バッチ(設計書§6) 03:00開始
+# 起案・決裁ワークフロー(ringi)の有効/試行は batch/config.json 側で切り替える(crontabは同じエントリ)
 0 3 * * *  /volume2/claude-system/batch/nightly.sh >> /volume2/claude-system/batch/nightly.log 2>&1
 
 # 04:00 直列チェーン: backfill → edges → skill_scout

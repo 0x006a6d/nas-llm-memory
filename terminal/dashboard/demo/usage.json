@@ -1,0 +1,28 @@
+{
+  "hours": 168,
+  "fetched_at": "07-21 12:00",
+  "grafana": "http://nas.example:3000/d/claude-code",
+  "totals": {"cost_usd": 12.34, "tokens": 45600000, "sessions": 21, "active_seconds": 43200},
+  "by_host": [
+    {"host": "MacBook-Pro", "cost_usd": 7.9, "tokens": 29000000},
+    {"host": "NucBoxEVO-X2", "cost_usd": 3.64, "tokens": 14100000},
+    {"host": "Mac-mini", "cost_usd": 0.8, "tokens": 2500000}
+  ],
+  "by_model": [
+    {"model": "claude-opus-4-8", "cost_usd": 7.9, "tokens": 29000000},
+    {"model": "claude-sonnet-5", "cost_usd": 3.3, "tokens": 9000000},
+    {"model": "claude-haiku-4-5-20251001", "cost_usd": 1.14, "tokens": 7600000}
+  ],
+  "by_type": [
+    {"type": "cacheRead", "tokens": 41000000},
+    {"type": "cacheCreation", "tokens": 3900000},
+    {"type": "output", "tokens": 500000},
+    {"type": "input", "tokens": 200000}
+  ],
+  "daily": [
+    {"date": "07-15", "cost_usd": 1.1}, {"date": "07-16", "cost_usd": 2.4},
+    {"date": "07-17", "cost_usd": 0.0}, {"date": "07-18", "cost_usd": 3.2},
+    {"date": "07-19", "cost_usd": 1.8}, {"date": "07-20", "cost_usd": 2.6},
+    {"date": "07-21", "cost_usd": 1.24}
+  ]
+}

@@ -12,6 +12,7 @@
              無いため、置換先の無い削除はこの自己参照 tombstone で表す。
   - index.md / sync-exclude.txt のファイル編集は保存前に同名 .bak へ退避。
 """
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import subprocess
 import tempfile
 import time
 import urllib.parse
+import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -339,6 +341,30 @@ def collect_skills():
                           f"plugin:{pr['plugin']}@{pr['marketplace']}",
                           editable=False, enabled=pr["enabled"])
             e["name"] = f"{pr['plugin']}:{e['name']}"  # /context の表示規則に合わせる
+            skills.append(e)
+
+    # Codex 側プラグイン(~/.codex/plugins/cache)の3層。openai-bundled = CLI 同梱の内蔵、
+    # openai-primary-runtime = 実行時に取得・組み立てられるランタイム、
+    # openai-curated-remote = リモート配布のプラグイン。
+    # 同一プラグインの旧バージョンが cache に残るため、更新時刻が最新のものを採る
+    # (バージョン名の辞書順では 0.10.0 < 0.9.0 になり旧版を掴む)
+    codex_cache = Path.home() / ".codex" / "plugins" / "cache"
+    for tier_dir, src in (("openai-bundled", "codex-builtin"),
+                          ("openai-primary-runtime", "codex-runtime"),
+                          ("openai-curated-remote", "codex-remote")):
+        picked = {}
+        for f in sorted(codex_cache.glob(f"{tier_dir}/*/*/skills/*/SKILL.md")):
+            key = (f.parents[3].name, f.parent.name)  # (plugin, skill名)
+            cur = picked.get(key)
+            if cur is None or f.stat().st_mtime >= cur.stat().st_mtime:
+                picked[key] = f
+        for (plugin, _name), f in sorted(picked.items()):
+            real = str(f.resolve())
+            if real in seen:
+                continue
+            seen.add(real)
+            e = _md_entry(f, f.parent.name, src, editable=False)
+            e["name"] = f"{plugin}:{e['name']}"
             skills.append(e)
 
     usage = skill_usage()  # {agent: {呼び出し名: {count,last}}}
@@ -744,6 +770,35 @@ def list_messages():
         "created_at, read_at from messages order by id desc limit 30")
 
 
+def codex_agents_state():
+    """Codex への index 配布物の生成状態(コンテキストタブ表示用)。
+
+    agents_sync.py が sender 実行時に生成する ~/.codex/AGENTS.md の管理セクションと、
+    登録プロジェクト(~/.claude-spool/codex-projects.json)の AGENTS.override.md を確認する。
+    """
+    marker = "<!-- nas-memory:begin"
+
+    def stat(p):
+        if not p.is_file():
+            return None
+        text = read_text(p) or ""
+        return {"path": str(p), "bytes": len(text.encode()),
+                "managed": marker in text,
+                "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d %H:%M")}
+
+    reg = load_json(HOME / ".claude-spool" / "codex-projects.json", [])
+    if not isinstance(reg, list):  # 手編集等でオブジェクト化していた場合に壊れないよう
+        reg = []
+    return {
+        "global": stat(HOME / ".codex" / "AGENTS.md"),
+        "registry_path": str(HOME / ".claude-spool" / "codex-projects.json"),
+        "projects": [{"dir": p,
+                      "agents": stat(Path(p) / "AGENTS.md"),
+                      "override": stat(Path(p) / "AGENTS.override.md")}
+                     for p in reg if isinstance(p, str)],
+    }
+
+
 def git_info():
     def g(*args):
         p = subprocess.run(["git", "-C", str(CONFIG_DIR), *args],
@@ -778,6 +833,7 @@ def state():
         "hook_scripts": sorted(p.name for p in (CONFIG_DIR / "hooks").glob("*.py")),
         "git": git_info(),
         "routing": routing_state(),
+        "codex_agents": codex_agents_state(),
         "skill_candidates": skill_candidates(),
         "vibe_island_present": (HOME / ".vibe-island/bin/vibe-island-bridge").exists(),
         "generated_at": datetime.now().strftime("%H:%M:%S"),
@@ -786,8 +842,12 @@ def state():
 
 # ---------------------------------------------------------------- NAS queries
 
-def nas_batch_config():
-    """NAS のバッチ共通設定(/volume2/claude-system/batch/config.json)。無し/読めなければ None。"""
+def _nas_batch_config_text():
+    """config.json の生バイト(書き戻し時のハッシュ照合に使う)。無し/読めなければ None。
+
+    照合はNAS側のsha256sum(実ファイル)と突き合わせるため、errors="replace"の
+    デコードを挟むと非UTF-8バイトでハッシュがずれ、無変更でも衝突扱いになる。
+    """
     try:
         proc = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", SSH_TARGET,
@@ -795,8 +855,19 @@ def nas_batch_config():
             capture_output=True, timeout=15)
         if proc.returncode != 0:
             return None
-        return json.loads(proc.stdout.decode(errors="replace"))
+        return proc.stdout
     except Exception:  # noqa: BLE001
+        return None
+
+
+def nas_batch_config():
+    """NAS のバッチ共通設定(/volume2/claude-system/batch/config.json)。無し/読めなければ None。"""
+    raw = _nas_batch_config_text()
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
         return None
 
 
@@ -836,6 +907,7 @@ def nas_snapshot():
             "group by device, project_key, cwd) t "
             "where rn = 1 order by device, project_key"),
         "batch_config": nas_batch_config(),
+        "shelf_pending": shelf_pending_count(),
         "fetched_at": datetime.now().strftime("%m-%d %H:%M:%S"),
     }
     CACHE_DIR.mkdir(exist_ok=True)
@@ -930,6 +1002,254 @@ def fact_op(op, project, content, fact_id):
     return run_sql(sql)
 
 
+# ---------------------------------------------------------------- 書架(起案・決裁文書)
+
+def _doc_no_disp(fy, seq):
+    """表示用文書番号(記憶第N号(令和X年度)。令和元年度は「元」)。
+
+    表記規則の正は nas/batch/ringi.py の display_doc_no。dashboard は
+    claude-config 側へ単体配布されるため import できず、ここにミラーする
+    (一致は tests/test_dashboard_ringi.py が ringi.py との照合で検査)。
+    UI(app.js)はこの値を表示するだけにし、年度計算を持たない。
+    """
+    n = int(fy) - 2018
+    return f"記憶第{int(seq)}号(令和{'元' if n == 1 else n}年度)"
+
+
+def _stamp_doc_no(row):
+    if row.get("fiscal_year") is not None and row.get("seq") is not None:
+        row["doc_no_disp"] = _doc_no_disp(row["fiscal_year"], row["seq"])
+    return row
+
+
+def shelf_list(filt, kind):
+    """drafts一覧。filt: pending(後閲待ち)|remanded(差し戻し中)|all。"""
+    if DEMO:
+        data = load_json(DEMO_DIR / "shelf.json", {})
+        rows = data.get("list", [])
+        if filt == "pending":
+            rows = [r for r in rows if r.get("seen_state") == "pending"]
+        elif filt == "remanded":
+            rows = [r for r in rows if r.get("seen_state") == "remanded"]
+        if kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        return [_stamp_doc_no(dict(r)) for r in rows]
+    cond = "true"
+    if filt == "pending":
+        # 後閲対象 = 完結して人間がまだ見ていない文書(施行済み・廃案・後閲待ちskill)
+        cond = "seen_state = 'pending' and state in ('executed','rejected','approved')"
+    elif filt == "remanded":
+        cond = "seen_state = 'remanded' or state = 'reexamine'"
+    if kind:
+        cond = f"({cond}) and kind = {dollar_quote(kind)}"
+    return [_stamp_doc_no(r) for r in sql_json(
+        "select id, doc_no, fiscal_year, seq, kind, project_key, title, state, "
+        "decision_class, seen_state, created_at, decided_at, executed_at, related_doc "
+        f"from drafts where {cond} order by id desc limit 100")]
+
+
+def shelf_doc(did):
+    """文書詳細: drafts行 + 回議録(draft_log) + 登載facts + 関連文書。"""
+    did = int(did)
+    if DEMO:
+        data = load_json(DEMO_DIR / "shelf.json", {})
+        doc = (data.get("docs") or {}).get(str(did))
+        if not doc:
+            raise ValueError(f"demo文書がありません: {did}")
+        return _stamp_doc_no(doc)
+    rows = sql_json(f"select * from drafts where id = {did}")
+    if not rows:
+        raise ValueError(f"文書がありません: id={did}")
+    doc = _stamp_doc_no(rows[0])
+    doc["log"] = sql_json(
+        "select id, actor, action, memo, created_at, created_by "
+        f"from draft_log where draft_id = {did} order by id")
+    doc["facts"] = sql_json(
+        "select f.id, f.content, f.status, (f.retired_by is not null) retired, "
+        "exists(select 1 from facts g where g.replaces = f.id) superseded "
+        f"from draft_facts df join facts f on f.id = df.fact_id "
+        f"where df.draft_id = {did} order by f.id")
+    rel = doc.get("related_doc")
+    doc["related"] = sql_json(
+        "select id, doc_no, kind, title, state from drafts "
+        f"where related_doc = {did}"
+        + (f" or id = {int(rel)}" if rel else "") + " "
+        "order by id")
+    return doc
+
+
+def shelf_op(op, draft_id, memo):
+    """後閲操作。kouetsu=後閲印 / remand=メモ付き差し戻し / approve_skill=skill施行許可。
+
+    差し戻しの意味論: executed文書→翌晩、決裁者が再審理(reexamine)。
+    approved(後閲待ちskill)→廃案。remandはメモ必須(前の担当者への指示)。
+    """
+    did = int(draft_id)
+    if DEMO:
+        raise RuntimeError("demo モードでは後閲操作できません")
+    today = datetime.now().strftime("%Y%m%d")
+    by = dollar_quote(f"dashboard-{today}")
+    if op == "kouetsu":
+        sql = ("update drafts set seen_state='seen', seen_at=now() "
+               f"where id={did} and seen_state='pending' "
+               "and state in ('executed','rejected') returning id;")
+        action, log_memo = "kouetsu", memo or None
+    elif op == "remand":
+        if not (memo or "").strip():
+            raise ValueError("差し戻しにはメモ(前の担当者への指示)が必要です")
+        sql = ("update drafts set seen_state='remanded', seen_at=now(), "
+               "state = case when state='executed' then 'reexamine' "
+               "when state='approved' then 'rejected' else state end "
+               f"where id={did} and seen_state='pending' "
+               "and state in ('executed','approved') returning id;")
+        action, log_memo = "sashimodoshi", memo
+    elif op == "approve_skill":
+        # 後閲印=施行許可。翌晩のnightlyがskills/へ移して施行する
+        sql = ("update drafts set seen_state='seen', seen_at=now() "
+               f"where id={did} and seen_state='pending' and state='approved' "
+               "and kind='skill' returning id;")
+        action, log_memo = "kouetsu", memo or "後閲印(施行許可)"
+    else:
+        raise ValueError(f"unknown op: {op}")
+    # 状態更新と回議録の記帳を1文(CTE)で行う: 更新だけ通って記帳が落ちると
+    # 後閲印や差し戻しの痕跡が残らないため
+    if not run_sql(f"with upd as ({sql.rstrip('; ')}) "
+                   "insert into draft_log (draft_id, actor, action, memo, created_by) "
+                   f"select id, 'human', {dollar_quote(action)}, "
+                   f"{dollar_quote(log_memo) if log_memo else 'null'}, {by} from upd "
+                   "returning draft_id;"):
+        raise ConflictError("文書の状態が変わっています。再読込してください")
+    return {"ok": True}
+
+
+def shelf_pending_count():
+    """後閲待ち文書数(概要タブの注意欄用)。012未適用ならNone。"""
+    try:
+        out = run_sql("select count(*) from drafts where seen_state='pending' "
+                      "and state in ('executed','rejected','approved');")
+        return int(out or 0)
+    except Exception:  # noqa: BLE001 — drafts未適用環境
+        return None
+
+
+# --------------------------------------------- 専決規程(batch/config.json)の編集
+
+BATCH_CONFIG_REMOTE = "/volume2/claude-system/batch/config.json"
+CONFIG_ROLES = ("kian", "shinsa", "kessai", "enrich")
+CONFIG_RINGI_TYPES = {
+    "enabled": bool, "trial": bool, "max_hosei_rounds": int, "max_kessai_rounds": int,
+    "skill_min_count": int, "skill_auto_execute": bool, "index_delete_ratio": (int, float),
+    "trial_models": list, "trial_budget_min": int,
+}
+# 数値設定の許容範囲(規程外の値を書いて翌晩のバッチを壊さない)
+CONFIG_RINGI_RANGE = {
+    "max_hosei_rounds": (0, 10), "max_kessai_rounds": (0, 10),
+    "skill_min_count": (1, 100), "index_delete_ratio": (0, 1),
+    "trial_budget_min": (1, 180),
+}
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,100}$")
+
+
+def save_batch_config(body):
+    """rolesとringi(専決規程)を検証してNASのconfig.jsonへ書き戻す。
+
+    - 既存configを土台に上書きし、未知キー(将来の設定)は保持する
+    - 楽観ロック: bodyのexpected(画面が読んだ時点のconfig)と現物が違えば409
+    - 書き込み前に.bakへ退避(index.md編集と同型)。反映は翌晩のバッチから
+    """
+    if DEMO:
+        raise RuntimeError("demo モードでは保存できません")
+    current_raw = _nas_batch_config_text()
+    try:
+        current = json.loads(current_raw) if current_raw is not None else {}
+    except ValueError:
+        current = {}
+    if body.get("expected") is not None and body["expected"] != current:
+        raise ConflictError("NASのconfig.jsonが別の場所で更新されています。"
+                            "再読込してから保存し直してください")
+    new = dict(current)
+    if "model" in body:
+        m = str(body["model"] or "")
+        if m and not MODEL_RE.match(m):
+            raise ValueError(f"model名が不正です: {m}")
+        # roles と同じく、空文字は「明示的な解除」(キーを残さない)
+        if m:
+            new["model"] = m
+        else:
+            new.pop("model", None)
+    if "roles" in body:
+        roles = body["roles"]
+        if not isinstance(roles, dict) or set(roles) - set(CONFIG_ROLES):
+            raise ValueError(f"rolesのキーは {'/'.join(CONFIG_ROLES)} のみ")
+        for k, v in roles.items():
+            if not isinstance(v, str) or (v and not MODEL_RE.match(v)):
+                raise ValueError(f"roles.{k} のモデル名が不正です: {v!r}")
+        # 送られたキーだけを既存へ重ねる(未送信の役割は現状維持、空文字は明示的な解除)
+        merged_roles = dict(current.get("roles") or {})
+        for k, v in roles.items():
+            if v:
+                merged_roles[k] = v
+            else:
+                merged_roles.pop(k, None)
+        new["roles"] = merged_roles
+    if "ringi" in body:
+        ringi = body["ringi"]
+        if not isinstance(ringi, dict) or set(ringi) - set(CONFIG_RINGI_TYPES):
+            raise ValueError("ringiに未知のキーがあります")
+        merged = dict(current.get("ringi") or {})
+        for k, v in ringi.items():
+            t = CONFIG_RINGI_TYPES[k]
+            if (isinstance(v, bool) and t is not bool) or not isinstance(v, t):
+                raise ValueError(f"ringi.{k} の型が不正です: {v!r}")
+            if k == "trial_models" and not all(
+                    isinstance(x, str) and MODEL_RE.match(x) for x in v):
+                raise ValueError("ringi.trial_models のモデル名が不正です")
+            if k in CONFIG_RINGI_RANGE:
+                lo, hi = CONFIG_RINGI_RANGE[k]
+                if not lo <= v <= hi:
+                    raise ValueError(f"ringi.{k} は {lo}〜{hi} の範囲で指定してください: {v!r}")
+            merged[k] = v
+        new["ringi"] = merged
+    text = json.dumps(new, ensure_ascii=False, indent=1) + "\n"
+    # 楽観ロックの本チェックはNAS側で行う: 読取りと書込みが別sshセッションだと、
+    # 並行する2つの保存がともにローカル比較を通過し、後勝ちで片方の変更が無警告に
+    # 消える。flock下で現物のsha256を照合してから差し替える(衝突は exit 109)。
+    # expectedが無い(初回等)ときは照合を省略する(従来どおり)
+    esha = ""
+    if body.get("expected") is not None:
+        esha = (hashlib.sha256(current_raw).hexdigest()
+                if current_raw is not None else "MISSING")
+    # 同一ディレクトリの一時ファイル(名前は重ならないようmktemp)へ受け、JSONとして
+    # 読めることを確かめてからmvで差し替える。転送が途中で切れても稼働中の
+    # config.jsonが半端なJSONにならない(バッチはこれを毎晩読む)。
+    # mktempの0600で既存の権限を潰さないよう、既存ファイルから権限を引き継ぐ
+    proc = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", SSH_TARGET,
+         f"set -e; "
+         f"exec 9> {BATCH_CONFIG_REMOTE}.lock; flock 9; "
+         f"if [ -n '{esha}' ]; then "
+         f"  if [ '{esha}' = 'MISSING' ]; then "
+         f"    if [ -f {BATCH_CONFIG_REMOTE} ]; then echo 'config conflict' >&2; exit 109; fi; "
+         f"  else "
+         f"    cur=$(sha256sum {BATCH_CONFIG_REMOTE} 2>/dev/null | cut -d' ' -f1 || true); "
+         f"    if [ \"$cur\" != '{esha}' ]; then echo 'config conflict' >&2; exit 109; fi; "
+         f"  fi; "
+         f"fi; "
+         f"cp {BATCH_CONFIG_REMOTE} {BATCH_CONFIG_REMOTE}.bak 2>/dev/null || true; "
+         f"t=$(mktemp {BATCH_CONFIG_REMOTE}.XXXXXX); trap 'rm -f \"$t\"' EXIT; "
+         'cat > "$t"; python3 -c \'import json,sys; json.load(open(sys.argv[1]))\' "$t"; '
+         f"if [ -f {BATCH_CONFIG_REMOTE} ]; then chmod --reference={BATCH_CONFIG_REMOTE} \"$t\"; "
+         f"else chmod 644 \"$t\"; fi; "
+         f"mv \"$t\" {BATCH_CONFIG_REMOTE}; trap - EXIT"],
+        input=text.encode(), capture_output=True, timeout=15)
+    if proc.returncode == 109:
+        raise ConflictError("NASのconfig.jsonが別の場所で更新されています。"
+                            "再読込してから保存し直してください")
+    if proc.returncode != 0:
+        raise RuntimeError(f"書き込み失敗: {proc.stderr.decode(errors='replace')[-300:]}")
+    return {"saved": True, "config": new}
+
+
 # ---------------------------------------------------------------- save files
 
 def resolve_save_target(target):
@@ -953,6 +1273,123 @@ def save_file(target, content):
         bak.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     path.write_text(content, encoding="utf-8")
     return {"path": str(path), "bytes": len(content.encode()), "backup": str(bak)}
+
+
+# ---------------------------------------------------------------- 使用量(Claude Code telemetry)
+# 各端末の Claude Code が OTLP で NAS の otel-collector に送るメトリクスを
+# Prometheus(NAS:9090)の HTTP API で集計する。ホストは ingest_url から導出し、
+# コードに IP を書かない。
+
+def _nas_host():
+    cfg = load_json(HOME / ".claude-spool" / "config.json", {})
+    host = urllib.parse.urlsplit(str(cfg.get("ingest_url") or "")).hostname
+    if not host:
+        raise RuntimeError("~/.claude-spool/config.json の ingest_url から NAS ホストを特定できません")
+    return host
+
+
+def _prom_query(base, expr, at=None, timeout=10):
+    params = {"query": expr}
+    if at is not None:
+        params["time"] = str(at)
+    url = f"{base}/api/v1/query?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        data = json.load(r)
+    if data.get("status") != "success":
+        raise RuntimeError(f"Prometheus 応答異常: {str(data)[:300]}")
+    return data["data"]["result"]
+
+
+def usage_snapshot(hours):
+    """期間内の Claude Code 使用量。
+
+    メトリクスはセッションごとに新系列になり、短命セッションでは全量が系列の
+    初期値に入るため increase() では数え漏れる。カウンタは単調増加なので
+    「セッション単位の max_over_time を合算」で期間合計を出す(期間境界を跨ぐ
+    セッションは全量が期間側に入る近似)。
+    """
+    if DEMO:
+        return json.loads((DEMO_DIR / "usage.json").read_text(encoding="utf-8"))
+    hours = max(1, min(int(hours), 24 * 92))
+    base = f"http://{_nas_host()}:9090"
+    rng = f"{hours}h"
+
+    def per_session(metric, by):
+        return _prom_query(base, f"max by ({by}) (max_over_time({metric}[{rng}]))")
+
+    def val(r):
+        return float(r["value"][1])
+
+    def agg(rows, key):
+        out = {}
+        for r in rows:
+            k = r["metric"].get(key) or "(不明)"
+            out[k] = out.get(k, 0.0) + val(r)
+        return out
+
+    cost_rows = per_session("claude_code_cost_usage_USD_total",
+                            "session_id, model, host_name")
+    tok_rows = per_session("claude_code_token_usage_tokens_total",
+                           "session_id, model, host_name, type")
+    act_rows = per_session("claude_code_active_time_seconds_total", "session_id")
+    sessions = ({r["metric"].get("session_id") for r in cost_rows} |
+                {r["metric"].get("session_id") for r in tok_rows})
+
+    cost_host, cost_model = agg(cost_rows, "host_name"), agg(cost_rows, "model")
+    tok_host, tok_model = agg(tok_rows, "host_name"), agg(tok_rows, "model")
+    tok_type = agg(tok_rows, "type")
+
+    def merged(cost_by, tok_by, label):
+        keys = sorted(set(cost_by) | set(tok_by),
+                      key=lambda k: -cost_by.get(k, 0.0))
+        return [{label: k, "cost_usd": round(cost_by.get(k, 0.0), 4),
+                 "tokens": int(tok_by.get(k, 0.0))} for k in keys]
+
+    # 日別コスト: 各日の終端時刻で max_over_time[その日の経過秒] を評価する。
+    # 日付を跨いで生きるセッションは累計値が跨いだ先の日にも入る近似(まれ)。
+    daily = []
+    if hours >= 48:
+        now = time.time()
+        midnight = datetime.now().replace(hour=0, minute=0, second=0,
+                                          microsecond=0).timestamp()
+
+        def day_cost(day_start, day_end):
+            # 当日窓は0時からの経過秒。深夜0時直後は0秒になり、Prometheusが
+            # duration 0 をパースエラーにするため1秒へ丸める
+            window = max(1, int(day_end - day_start))
+            date = datetime.fromtimestamp(day_start).strftime("%m-%d")
+            try:
+                rows = _prom_query(
+                    base,
+                    "sum(max by (session_id, model) (max_over_time("
+                    f"claude_code_cost_usage_USD_total[{window}s])))",
+                    at=day_end, timeout=4)  # 日別は短めの専用timeout(重い日の累積待機を抑える)
+            except Exception:  # noqa: BLE001 — 日別は補助情報。1日の失敗でタブ全体を落とさない
+                return {"date": date, "cost_usd": None}  # 欠測(UIは「欠測」と表示)
+            return {"date": date,
+                    "cost_usd": round(val(rows[0]), 4) if rows else 0.0}
+
+        days = [(midnight - i * 86400, min(now, midnight - i * 86400 + 86400))
+                for i in range(min(hours // 24, 31) - 1, -1, -1)]
+        # 最大31回の逐次クエリでリクエストスレッドを長く埋めないよう並列化
+        # (mapは投入順を保つので日付順は崩れない)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            daily = list(pool.map(lambda d: day_cost(*d), days))
+
+    return {
+        "hours": hours,
+        "fetched_at": datetime.now().strftime("%m-%d %H:%M"),
+        "grafana": f"http://{_nas_host()}:3000/d/claude-code",
+        "totals": {"cost_usd": round(sum(cost_host.values()), 4),
+                   "tokens": int(sum(tok_type.values())),
+                   "sessions": len(sessions),
+                   "active_seconds": int(sum(val(r) for r in act_rows))},
+        "by_host": merged(cost_host, tok_host, "host"),
+        "by_model": merged(cost_model, tok_model, "model"),
+        "by_type": sorted(({"type": k, "tokens": int(v)} for k, v in tok_type.items()),
+                          key=lambda r: -r["tokens"]),
+        "daily": daily,
+    }
 
 
 # ---------------------------------------------------------------- http server
@@ -1016,6 +1453,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(list_flags())
             elif url.path == "/api/messages":
                 self.send_json(list_messages())
+            elif url.path == "/api/shelf":
+                self.send_json(shelf_list(q.get("filter", ["pending"])[0],
+                                          q.get("kind", [""])[0]))
+            elif url.path == "/api/shelf_doc":
+                self.send_json(shelf_doc(q["id"][0]))
+            elif url.path == "/api/usage":
+                self.send_json(usage_snapshot(q.get("hours", ["168"])[0]))
             else:
                 self.send_error(404)
         except Exception as e:  # noqa: BLE001 — API 応答としてエラーを返す
@@ -1060,6 +1504,11 @@ class Handler(BaseHTTPRequestHandler):
                 out = flag_op(body.get("op"), body.get("session_id"),
                               body.get("note", ""))
                 self.send_json({"result": out})
+            elif self.path == "/api/shelf_op":
+                self.send_json(shelf_op(body.get("op"), body.get("id"),
+                                        body.get("memo", "")))
+            elif self.path == "/api/batch_config":
+                self.send_json(save_batch_config(body))
             else:
                 self.send_error(404)
         except ConflictError as e:

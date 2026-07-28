@@ -116,7 +116,7 @@ body {
 .stamp { font-size: 11px; color: var(--faint); font-family: var(--mono); }
 
 /* ---- content ---- */
-.content { padding: 34px 40px 60px; max-width: 1060px; }
+.content { padding: 34px 40px 60px; }
 
 .pane { animation: enter 240ms var(--ease); }
 
@@ -353,6 +353,8 @@ textarea.editor {
 .filelist button:hover { color: var(--text); background: rgba(255, 255, 255, 0.04); }
 .filelist button.sel { color: var(--text); background: var(--panel); border-color: var(--hairline-strong); }
 .filelist .kb { font-family: var(--mono); font-size: 11px; color: var(--faint); flex: none; }
+.filelist .grp { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: 0.05em; margin: 14px 4px 4px; padding-top: 10px; border-top: 1px solid var(--hairline); }
+.filelist .grp:first-child { margin-top: 0; padding-top: 0; border-top: none; }
 
 /* byte gauge */
 .gauge { position: relative; height: 8px; border-radius: 4px; background: rgba(0, 0, 0, 0.35); border: 1px solid var(--hairline); margin: 8px 0 4px; }
@@ -457,6 +459,13 @@ details summary { cursor: pointer; color: var(--faint); font-size: 12px; }
 .fact-body[contenteditable]:hover { background: rgba(255, 255, 255, 0.03); }
 .fact-body[contenteditable]:focus { outline: 1px solid var(--amber); background: rgba(224, 164, 94, 0.05); }
 
+/* fact 行の編集領域: 他の入力欄(.lnfield)と同じ枠・背景に揃える */
+.fact-field { flex: 1; min-width: 0; display: flex; align-items: stretch; background: rgba(0, 0, 0, 0.3); border: 1px solid var(--hairline-strong); border-radius: 8px; padding: 4px 6px; }
+.fact-field:focus-within { outline: 2px solid var(--amber); outline-offset: 1px; }
+.fact-field .fact-body[contenteditable] { margin: 0; padding: 2px 4px; }
+.fact-field .fact-body[contenteditable]:hover { background: transparent; }
+.fact-field .fact-body[contenteditable]:focus { outline: none; background: transparent; }
+
 /* 1行入力欄の行番号(常に1)。枠は外側の .lnfield が持ち、中の input は素通し */
 .lnfield { display: flex; align-items: stretch; background: rgba(0, 0, 0, 0.3); border: 1px solid var(--hairline-strong); border-radius: 8px; }
 .toolrow .lnfield { flex: 1; min-width: 200px; }
@@ -466,3 +475,20 @@ details summary { cursor: pointer; color: var(--faint); font-size: 12px; }
 .lnfield input:focus-visible { outline: none; }
 /* fact 本文用の小型ガター */
 .fact-gutter { width: 26px; }
+
+/* 画面幅に応じて 1〜n 列に組み替わるパネルグリッド(使用量・申し送り等) */
+.ugrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 14px; margin-top: 20px; align-items: start; }
+.upanel .section { margin: 0 0 12px; }
+.ubar { flex: 1; height: 8px; min-width: 120px; border-radius: 4px; background: rgba(0, 0, 0, 0.35); border: 1px solid var(--hairline); }
+.ubar i { display: block; height: 100%; border-radius: 4px; background: var(--amber); }
+td .ubar { min-width: 160px; }
+.urow { display: flex; align-items: center; gap: 12px; padding: 3px 0; font-size: 12.5px; }
+.urow > span:first-child { flex: none; width: 44px; }
+.urow > span:last-child { flex: none; width: 64px; text-align: right; }
+
+/* 書架: 決裁欄(起案・審査・決裁・後閲の印箱) */
+.kessai-ran { display: flex; gap: 8px; margin: 10px 0 14px; flex-wrap: wrap; }
+.kessai-ran .kbox { border: 1px solid var(--hairline-strong); border-radius: 6px; min-width: 128px; padding: 7px 10px; text-align: center; }
+.kessai-ran .kbox .kr { font-size: 11px; opacity: .6; letter-spacing: .35em; }
+.kessai-ran .kbox .kv { font-size: 12px; margin-top: 4px; word-break: break-all; line-height: 1.5; }
+.kessai-ran .kbox.done { border-color: rgba(224, 164, 94, 0.55); }
