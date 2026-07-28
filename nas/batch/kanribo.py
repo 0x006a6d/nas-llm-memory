@@ -211,7 +211,10 @@ def dispose_sql(f: dict, draft_id: int) -> str:
     - その他: 行削除。batch_runs は watermark を持つ最新の成功runを必ず残す
 
     範囲は管理簿の id_from〜id_to(整理で確定済み)に限定し、中分類(project_key)でも絞る。
+    措置が廃棄でないファイルは受け付けない(呼び出し側の絞り込みに依存しない)。
     """
+    if f.get("measure") != "haiki":
+        raise ValueError(f"廃棄SQL: 措置が廃棄でない({f.get('measure')}) {f.get('name')}")
     cat = f["category"]
     src = SOURCES[cat]
     lo, hi = int(f["id_from"]), int(f["id_to"])
@@ -259,15 +262,40 @@ def survivors_sql(f: dict) -> str:
 
 
 def disposed_sql(file_id: int, draft_id: int, n: int, state: str = "haiki_zumi") -> str:
-    """管理簿に施行の結果を記載する。"""
+    """管理簿に施行の結果を記載する(施行と別文で呼ぶ経路用)。"""
     return (
         f"UPDATE record_files SET state = {q(state)}, disposed_draft = {int(draft_id)}, "
         f"n_rows = {int(n)}, updated_at = now() WHERE id = {int(file_id)} RETURNING id;"
     )
 
 
+def dispose_and_record_sql(f: dict, draft_id: int, state: str = "haiki_zumi") -> str:
+    """廃棄・移管の実行と管理簿への記載を1文にする。
+
+    別々に流すと、消えたのに管理簿が現用のまま(またはその逆)という中間状態が
+    残りうる。実行した件数をそのまま管理簿の件数に書く。
+    """
+    inner = dispose_sql(f, draft_id) if state == "haiki_zumi" else ikan_delete_sql(f)
+    body = inner[len("WITH d AS ("):].rsplit(") SELECT count(*) FROM d;", 1)[0]
+    return (
+        f"WITH d AS ({body}), "
+        f"u AS (UPDATE record_files SET state = {q(state)}, "
+        f"disposed_draft = {int(draft_id)}, n_rows = (SELECT count(*) FROM d), "
+        f"updated_at = now() WHERE id = {int(f['id'])}) "
+        f"SELECT count(*) FROM d;"
+    )
+
+
+def unfile_sql(file_id: int) -> str:
+    """起票を取り消して未起票へ戻す(処理中断時)。決着した否決には使わない。"""
+    return (f"UPDATE record_files SET disposed_draft = NULL, updated_at = now() "
+            f"WHERE id = {int(file_id)} AND state = 'manryou' RETURNING id;")
+
+
 def haiki_items(f: dict, survivors: int = 0) -> list:
     """廃棄伺いの「記」の箇条(件名・数量・保存期間・満了日を明示する)。"""
+    if f.get("measure") != "haiki":
+        raise ValueError(f"廃棄伺い: 措置が廃棄でない({f.get('measure')}) {f.get('name')}")
     items = [
         f"分類 {f['category']}・ファイル「{f['name']}」を廃棄する",
         f"保存期間は{('満了日 ' + str(f['expires_on'])[:10]) if f.get('expires_on') else '常用'}"
@@ -301,7 +329,12 @@ def export_sql(f: dict) -> str:
 
 
 def ikan_delete_sql(f: dict) -> str:
-    """移管後にDBから外すSQL(中身はアーカイブ領域に残っている)。"""
+    """移管後にDBから外すSQL(中身はアーカイブ領域に残っている)。
+
+    措置が移管でないファイルは受け付けない(廃棄経路と取り違えない)。
+    """
+    if f.get("measure") != "ikan":
+        raise ValueError(f"移管SQL: 措置が移管でない({f.get('measure')}) {f.get('name')}")
     src = SOURCES[f["category"]]
     key_expr = src["key"].replace("to_project", "x.to_project") \
         if "to_project" in src["key"] else src["key"]

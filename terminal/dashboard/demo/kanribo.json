@@ -53,7 +53,7 @@
    "name": "収受(生データ) general 令和8年度4月",
    "period": "2026-04",
    "fiscal_year": 2026,
-   "expires_on": "2026-07-29",
+   "expires_on": "2026-07-25",
    "measure": "haiki",
    "location": "DB raw_payloads",
    "state": "manryou",
@@ -64,7 +64,7 @@
    "retention_years": 0,
    "gate": "sokujiko",
    "retention_disp": "90日",
-   "days_left": 0
+   "days_left": -3
   },
   {
    "id": 2,

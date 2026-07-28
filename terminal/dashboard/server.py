@@ -1200,7 +1200,8 @@ def kanribo_counts():
     try:
         out = run_sql(
             "select count(*) filter (where state='genyou'), "
-            "count(*) filter (where state='genyou' and expires_on <= current_date), "
+            "count(*) filter (where state='manryou' "
+            "  or (state='genyou' and expires_on <= current_date)), "
             "count(*) filter (where state in ('haiki_zumi','ikan_zumi')) "
             "from record_files;")
         genyou, manryou, sumi = (int(x or 0) for x in (out or "0|0|0").split("|"))

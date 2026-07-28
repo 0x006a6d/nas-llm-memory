@@ -59,6 +59,15 @@ class TestDisposeSql(unittest.TestCase):
         self.assertIn("BETWEEN 10 AND 400", sql)
         self.assertIn("'proj'", sql)
 
+    def test_measure_guard(self):
+        """措置の取り違えを本体で止める(呼び出し側の絞り込みに依存しない)。"""
+        with self.assertRaises(ValueError):
+            kanribo.dispose_sql(rec(measure="ikan"), 5)          # 移管を削除しない
+        with self.assertRaises(ValueError):
+            kanribo.ikan_delete_sql(rec(measure="haiki"))
+        with self.assertRaises(ValueError):
+            kanribo.haiki_items(rec(measure="jouyou"))           # 常用を廃棄しない
+
     def test_survivors_only_for_turns(self):
         self.assertIn("current_facts", kanribo.survivors_sql(rec()))
         self.assertEqual(kanribo.survivors_sql(rec(category="shuju-raw")), "")
@@ -202,7 +211,8 @@ class TestIkanSql(unittest.TestCase):
         self.assertNotIn("= 'general'", sql)   # キーが定数の分類は範囲だけで絞る
 
     def test_delete_after_export(self):
-        sql = kanribo.ikan_delete_sql(rec(category="kessai-doc", location="DB drafts"))
+        sql = kanribo.ikan_delete_sql(rec(category="kessai-doc", measure="ikan",
+                                         location="DB drafts"))
         self.assertIn("DELETE FROM drafts", sql)
         self.assertIn("BETWEEN 10 AND 400", sql)
 
@@ -275,6 +285,45 @@ class TestRingiIkan(unittest.TestCase):
     def test_haiki_files_are_not_migrated(self):
         h = IkanHarness(self.dir, files=[rec(measure="haiki")])
         self.assertEqual(h.run_ikan(), 0)
+
+
+class TestAtomicityAndRollback(unittest.TestCase):
+    def test_dispose_and_record_is_one_statement(self):
+        """実行と管理簿の記載を1文にする(消えたのに管理簿が現用、を作らない)。"""
+        sql = kanribo.dispose_and_record_sql(rec(), draft_id=5)
+        self.assertEqual(sql.count(";"), 1)
+        self.assertIn("DELETE FROM turns", sql)
+        self.assertIn("UPDATE record_files SET state = 'haiki_zumi'", sql)
+        self.assertIn("n_rows = (SELECT count(*) FROM d)", sql)   # 実際に消えた件数
+        self.assertIn("WHERE id = 7", sql)
+
+    def test_dispose_and_record_for_ikan(self):
+        sql = kanribo.dispose_and_record_sql(rec(category="kessai-doc", measure="ikan",
+                                                 location="DB drafts"), 5,
+                                             state="ikan_zumi")
+        self.assertEqual(sql.count(";"), 1)
+        self.assertIn("DELETE FROM drafts", sql)
+        self.assertIn("'ikan_zumi'", sql)
+
+    def test_unfile_only_touches_manryou(self):
+        sql = kanribo.unfile_sql(7)
+        self.assertIn("disposed_draft = NULL", sql)
+        self.assertIn("state = 'manryou'", sql)   # 施行済みの記載は戻さない
+
+    def test_abort_restores_unfiled_state(self):
+        """処理中断は決着ではないので、起票を取り消して翌晩また拾えるようにする。"""
+        h = HaikiHarness()
+        h.scripts["shinsa-haiki"] = []     # 応答が尽きて例外になる
+        h.run_haiki()                      # 件単位で握りつぶす
+        self.assertTrue(h.sqls_like("disposed_draft = NULL"))
+
+    def test_hiketsu_keeps_filed_marker(self):
+        """否決は決着なので起票の印を残す(毎晩むやみに再起票しない)。"""
+        h = HaikiHarness()
+        h.scripts["shinsa-haiki"] = [{"action": "hiketsu", "memo": "保存継続"}]
+        h.scripts["kessai-haiki"] = []
+        h.run_haiki()
+        self.assertEqual(h.sqls_like("disposed_draft = NULL"), [])
 
 
 if __name__ == "__main__":

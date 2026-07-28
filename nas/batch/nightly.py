@@ -559,8 +559,7 @@ def execute_haiki_doc(draft_id: int, file_id: int, run_id: int):
         return 0
     if not backup_is_fresh():
         raise RuntimeError("廃棄施行: 当日のpg_dumpが無い(バックアップ後に施行する)")
-    n = int(psql(kanribo.dispose_sql(f, draft_id)) or 0)
-    psql(kanribo.disposed_sql(file_id, draft_id, n))
+    n = int(psql(kanribo.dispose_and_record_sql(f, draft_id)) or 0)
     advance_draft(draft_id, "approved", "shiko")
     record_draft(draft_id, "system", "shiko", run_id,
                  memo=f"{f['name']} を廃棄({n}件)")
@@ -637,6 +636,8 @@ def _file_haiki_doc(f: dict, rule: dict, run_id: int, models: dict):
             if state in ("pending_review", "pending_decision"):
                 advance_draft(did, state, "hiketsu")
                 record_draft(did, "system", "hiketsu", run_id, memo="処理中断のため廃案")
+            # 中断は「決着していない」ので起票を取り消し、翌晩また拾えるようにする
+            psql(kanribo.unfile_sql(int(f["id"])))
         except Exception:
             pass
         raise
@@ -721,8 +722,7 @@ def execute_ikan_doc(draft_id: int, file_id: int, run_id: int):
     rows = psql_json(kanribo.export_sql(f)) or []
     rel = kanribo.archive_path(f)
     n, sha = _write_archive(rel, rows)
-    deleted = int(psql(kanribo.ikan_delete_sql(f)) or 0)
-    psql(kanribo.disposed_sql(file_id, draft_id, n, state="ikan_zumi"))
+    deleted = int(psql(kanribo.dispose_and_record_sql(f, draft_id, state="ikan_zumi")) or 0)
     advance_draft(draft_id, "approved", "shiko")
     record_draft(draft_id, "system", "shiko", run_id,
                  memo=f"archive/{rel} へ移管({n}件、DBから{deleted}件外した)")

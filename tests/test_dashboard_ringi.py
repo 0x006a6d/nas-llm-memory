@@ -150,3 +150,20 @@ class TestKanriboFilters(unittest.TestCase):
     def test_jouyou_never_counted_as_expired(self):
         # 満了日NULL(常用)は満了に出ない
         self.assertNotIn(5, self._demo_ids("manryou"))
+
+
+class TestKanriboCounts(unittest.TestCase):
+    def test_manryou_count_matches_list_condition(self):
+        """概況の満了件数と管理簿一覧のフィルタが同じ条件であること。"""
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "run_sql", return_value="3|1|0") as rs:
+            out = server.kanribo_counts()
+        sql = rs.call_args[0][0]
+        self.assertIn("state='manryou'", sql)                 # 満了に進んだ分も数える
+        self.assertIn("expires_on <= current_date", sql)      # まだ現用の満了分も数える
+        self.assertEqual(out, {"genyou": 3, "manryou": 1, "sumi": 0})
+
+    def test_counts_none_when_schema_absent(self):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "run_sql", side_effect=RuntimeError("no table")):
+            self.assertIsNone(server.kanribo_counts())
