@@ -4,9 +4,11 @@ nightly.py はimport時に SYSTEM_DIR/batch/config.json を読むため、
 CLAUDE_SYSTEM_DIR を一時ディレクトリへ向けてから毎回別名でロードする。
 実行: python3 -m unittest discover tests
 """
+import atexit
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -19,12 +21,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "nas" / "batch")
 NIGHTLY_PATH = Path(__file__).resolve().parent.parent / "nas" / "batch" / "nightly.py"
 
 _seq = 0
+_tmpdirs = []
+
+
+def _sweep_tmpdirs():
+    for d in _tmpdirs:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# load_nightlyは全テストが共用するため、呼び出し側ごとのaddCleanupではなく
+# インタプリタ終了時にまとめて掃除する(/tmpに残骸を残さない)
+atexit.register(_sweep_tmpdirs)
 
 
 def load_nightly(config=None):
     """config(dict|str|None)をbatch/config.jsonに置いた一時SYSTEM_DIRでnightlyをロード。"""
     global _seq
     tmp = Path(tempfile.mkdtemp(prefix="nightly-test-"))
+    _tmpdirs.append(tmp)
     (tmp / "batch").mkdir()
     if config is not None:
         text = config if isinstance(config, str) else json.dumps(config, ensure_ascii=False)

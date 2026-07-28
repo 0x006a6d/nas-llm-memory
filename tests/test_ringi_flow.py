@@ -228,13 +228,25 @@ class TestKessaiBatching(unittest.TestCase):
             self.assertEqual(nums, list(range(len(nums))))
             self.assertEqual(len(nums), 2)
 
-    def test_malformed_batch_falls_back_to_approve(self):
+    def test_malformed_batch_falls_back_to_hiketsu(self):
+        """形式不一致の決裁応答は否決へ倒す(未レビューの置換承認を防ぐ。index経路と同じ保守側)"""
         h = Harness(shortlist=[{"id": 41, "content": "旧事実"}])
         cases = [(cand(f"候補{i}"), {"action": "insert", "replaces": 41}) for i in range(2)]
         h.scripts["kessai"] = [[{"action": "hiketsu", "memo": "件数不一致"}]]  # 2件に対し1件
         with h.ctx():
             res = h.mod.judge_kessai("proj", cases, model="mo")
-        self.assertEqual([r["action"] for r in res], ["approve", "approve"])
+        self.assertEqual([r["action"] for r in res], ["hiketsu", "hiketsu"])
+        self.assertTrue(all("形式不一致" in r["memo"] for r in res))
+
+    def test_unknown_kessai_action_becomes_hiketsu(self):
+        """決裁が不明なactionを返した案件は廃案(承認扱いにしない)。"""
+        h = Harness(shortlist=[{"id": 41, "content": "旧事実"}])
+        h.scripts["shinsa"] = [[{"action": "insert", "replaces": 41, "extends": []}]]
+        h.scripts["kessai"] = [[{"action": "toriaezu_ok"}]]  # 規定外のaction
+        ins, drp = h.run([cand("候補X")])
+        self.assertEqual((ins, drp), (0, 1))
+        self.assertTrue(h.sqls_like("state='rejected'"))
+        self.assertIn("応答形式不一致", "\n".join(h.sqls_like("INSERT INTO draft_log")))
 
 
 class TestFailCompensation(unittest.TestCase):

@@ -843,7 +843,11 @@ def state():
 # ---------------------------------------------------------------- NAS queries
 
 def _nas_batch_config_text():
-    """config.json の生テキスト(書き戻し時のハッシュ照合に使う)。無し/読めなければ None。"""
+    """config.json の生バイト(書き戻し時のハッシュ照合に使う)。無し/読めなければ None。
+
+    照合はNAS側のsha256sum(実ファイル)と突き合わせるため、errors="replace"の
+    デコードを挟むと非UTF-8バイトでハッシュがずれ、無変更でも衝突扱いになる。
+    """
     try:
         proc = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", SSH_TARGET,
@@ -851,18 +855,18 @@ def _nas_batch_config_text():
             capture_output=True, timeout=15)
         if proc.returncode != 0:
             return None
-        return proc.stdout.decode(errors="replace")
+        return proc.stdout
     except Exception:  # noqa: BLE001
         return None
 
 
 def nas_batch_config():
     """NAS のバッチ共通設定(/volume2/claude-system/batch/config.json)。無し/読めなければ None。"""
-    text = _nas_batch_config_text()
-    if text is None:
+    raw = _nas_batch_config_text()
+    if raw is None:
         return None
     try:
-        return json.loads(text)
+        return json.loads(raw)
     except ValueError:
         return None
 
@@ -1155,9 +1159,9 @@ def save_batch_config(body):
     """
     if DEMO:
         raise RuntimeError("demo モードでは保存できません")
-    current_text = _nas_batch_config_text()
+    current_raw = _nas_batch_config_text()
     try:
-        current = json.loads(current_text) if current_text is not None else {}
+        current = json.loads(current_raw) if current_raw is not None else {}
     except ValueError:
         current = {}
     if body.get("expected") is not None and body["expected"] != current:
@@ -1213,8 +1217,8 @@ def save_batch_config(body):
     # expectedが無い(初回等)ときは照合を省略する(従来どおり)
     esha = ""
     if body.get("expected") is not None:
-        esha = (hashlib.sha256(current_text.encode()).hexdigest()
-                if current_text is not None else "MISSING")
+        esha = (hashlib.sha256(current_raw).hexdigest()
+                if current_raw is not None else "MISSING")
     # 同一ディレクトリの一時ファイル(名前は重ならないようmktemp)へ受け、JSONとして
     # 読めることを確かめてからmvで差し替える。転送が途中で切れても稼働中の
     # config.jsonが半端なJSONにならない(バッチはこれを毎晩読む)。
@@ -1353,12 +1357,16 @@ def usage_snapshot(hours):
             # 当日窓は0時からの経過秒。深夜0時直後は0秒になり、Prometheusが
             # duration 0 をパースエラーにするため1秒へ丸める
             window = max(1, int(day_end - day_start))
-            rows = _prom_query(
-                base,
-                "sum(max by (session_id, model) (max_over_time("
-                f"claude_code_cost_usage_USD_total[{window}s])))",
-                at=day_end, timeout=4)  # 日別は短めの専用timeout(重い日の累積待機を抑える)
-            return {"date": datetime.fromtimestamp(day_start).strftime("%m-%d"),
+            date = datetime.fromtimestamp(day_start).strftime("%m-%d")
+            try:
+                rows = _prom_query(
+                    base,
+                    "sum(max by (session_id, model) (max_over_time("
+                    f"claude_code_cost_usage_USD_total[{window}s])))",
+                    at=day_end, timeout=4)  # 日別は短めの専用timeout(重い日の累積待機を抑える)
+            except Exception:  # noqa: BLE001 — 日別は補助情報。1日の失敗でタブ全体を落とさない
+                return {"date": date, "cost_usd": None}  # 欠測(UIは「欠測」と表示)
+            return {"date": date,
                     "cost_usd": round(val(rows[0]), 4) if rows else 0.0}
 
         days = [(midnight - i * 86400, min(now, midnight - i * 86400 + 86400))

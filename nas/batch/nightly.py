@@ -1038,7 +1038,7 @@ def judge_kessai(key: str, cases: list, model: str) -> list:
         lines += [f"    [{s['id']}] {s['content']}" for s in sl] or ["    (なし)"]
         texts.append((c["content"], "\n".join(lines)))
 
-    res: list = [{"action": "approve"} for _ in cases]
+    res: list = [{"action": "hiketsu", "memo": "応答形式不一致"} for _ in cases]
     overhead = len(KESSAI_PROMPT)
     pos = 0
     while pos < len(texts):
@@ -1056,10 +1056,14 @@ def judge_kessai(key: str, cases: list, model: str) -> list:
                          f"kessai:{key}", model=model)
         sub = extract_json(out, f"kessai:{key}")
         if not isinstance(sub, list) or len(sub) != len(batch):
-            # 形式不一致の保守側: 審査案のまま承認(現行方針=取り逃さない)
-            sub = [{"action": "approve"} for _ in batch]
+            # 形式不一致は否決へ倒す: 置換・矛盾疑いの重要案件を未レビューで承認しない
+            # (index経路の「形式不一致は現行維持」、補正ループの「形式不一致は取り下げ」
+            # と同じ保守側。否決された候補は再起票されないので、決裁モデルの不調は
+            # 上申案件のまとめ廃案として書架に見える)
+            sub = [{"action": "hiketsu", "memo": "応答形式不一致"} for _ in batch]
         for j, i in enumerate(batch):
-            res[i] = sub[j] if isinstance(sub[j], dict) else {"action": "approve"}
+            res[i] = sub[j] if isinstance(sub[j], dict) \
+                else {"action": "hiketsu", "memo": "応答形式不一致"}
     return res
 
 
@@ -1743,11 +1747,16 @@ def ringi_facts_project(project: str, candidates: list, run_id: int) -> tuple[in
                     journal_j.append((_actor("kessai", models["kessai"]), "sashimodoshi",
                                       f"[{i}] {str(r.get('memo') or '')[:200]}",
                                       None))
-                else:  # approve(不明なactionも保守側=審査案のまま承認)
+                elif act == "approve":
                     rep = r.get("replaces", dec[i].get("replaces"))
                     dec[i]["replaces"] = rep if isinstance(rep, int) and rep in allow[i] \
                         else (None if rep is None else dec[i].get("replaces"))
                     approved_j.append(i)
+                else:
+                    # 不明なaction(応答の破損)は否決へ倒す(未レビューの承認を作らない)
+                    dead[i] = "否決"
+                    journal_j.append((_actor("kessai", models["kessai"]), "hiketsu",
+                                      f"[{i}] 応答形式不一致(action={act!r})", None))
             if not sashi:
                 break
             # 差し戻し分を審査が再判定(決裁メモを申し送りに)

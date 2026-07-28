@@ -1432,8 +1432,8 @@ function renderUsage(el) {
       ${U.daily.length ? panel("日別コスト",
         U.daily.map((d) => `<div class="urow">
           <span class="mono faint">${esc(d.date)}</span>
-          ${bar(d.cost_usd, maxDay)}
-          <span class="mono">${money(d.cost_usd)}</span>
+          ${bar(d.cost_usd ?? 0, maxDay)}
+          <span class="mono">${d.cost_usd == null ? '<span class="faint">欠測</span>' : money(d.cost_usd)}</span>
         </div>`).join("")) : ""}
       ${breakdown("端末別", U.by_host, "host")}
       ${breakdown("モデル別", U.by_model, "model")}
