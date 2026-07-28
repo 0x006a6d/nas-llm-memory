@@ -71,7 +71,7 @@ for f in ingest/schema/001_init.sql ingest/schema/003_p2.sql \
          ingest/schema/006_agent.sql ingest/schema/007_originator.sql \
          ingest/schema/008_reader.sql ingest/schema/009_edges.sql \
          ingest/schema/010_messages.sql ingest/schema/011_retired.sql \
-         ingest/schema/012_ringi.sql; do
+         ingest/schema/012_ringi.sql ingest/schema/013_ringi_fixup.sql; do
   docker compose exec -T db psql -U claude -d claude_memory -v ON_ERROR_STOP=1 -f - < "$f"
 done
 ```
