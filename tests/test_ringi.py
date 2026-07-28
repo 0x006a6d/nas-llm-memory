@@ -61,9 +61,12 @@ class TestTransitions(unittest.TestCase):
                 ringi.next_state(state, action)
 
     def test_states_match_schema(self):
-        """TRANSITIONSに現れる状態・actionが012のCHECK句の集合と一致する"""
-        sql = (Path(__file__).resolve().parent.parent
-               / "nas" / "ingest" / "schema" / "012_ringi.sql").read_text(encoding="utf-8")
+        """TRANSITIONSに現れる状態・actionがスキーマ(012以降のマイグレーション全体)の
+        CHECK句の集合と一致する"""
+        schema_dir = (Path(__file__).resolve().parent.parent
+                      / "nas" / "ingest" / "schema")
+        sql = "\n".join(p.read_text(encoding="utf-8")
+                        for p in sorted(schema_dir.glob("0*.sql")))
         states = set()
         for frm, act in ringi.TRANSITIONS:
             states.add(frm)

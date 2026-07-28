@@ -26,8 +26,7 @@ CREATE TABLE IF NOT EXISTS drafts (
   executed_at    timestamptz,
   seen_state     text NOT NULL DEFAULT 'pending' CHECK (seen_state IN ('pending','seen','remanded')),
   seen_at        timestamptz,                -- 後閲(pending=後閲待ち/seen=後閲済み/remanded=差し戻し)
-  -- 再審理(saishinri)文書→原文書。原文書が消える経路(失敗run補償)では参照をNULLへ
-  related_doc    bigint REFERENCES drafts(id) ON DELETE SET NULL,
+  related_doc    bigint REFERENCES drafts(id),  -- 再審理(saishinri)文書→原文書
   created_at     timestamptz NOT NULL DEFAULT now(),
   created_by     text NOT NULL,              -- 'run-<id>'(失敗補償の削除キー)
   UNIQUE (fiscal_year, seq)
@@ -44,7 +43,7 @@ CREATE TABLE IF NOT EXISTS draft_log (
   actor      text NOT NULL,   -- 'kian:<model>' | 'shinsa:<model>' | 'kessai:<model>' | 'human'
   action     text NOT NULL CHECK (action IN
                ('kian','hosei','shinsa_ok','joshin','sashimodoshi',
-                'kessai_ok','hiketsu','shiko','kouetsu','saishinri','skill_mv')),
+                'kessai_ok','hiketsu','shiko','kouetsu','saishinri')),
   memo       text,            -- 差し戻しメモ・審査意見
   payload    jsonb,           -- LLM応答の生JSON(監査用)
   created_at timestamptz NOT NULL DEFAULT now(),
