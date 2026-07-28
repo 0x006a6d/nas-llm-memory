@@ -14,6 +14,7 @@ import ssl
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -36,6 +37,7 @@ SENT_KEEP_DAYS = 14   # 障害復旧用にsentを保持(設計書§10 P0)
 CODEX_MIN_AGE = 300   # 書きかけrollout回避: mtimeが5分以上前のみ送る(Codex追補§2.1)
 CODEX_CHUNK_BYTES = 8_000_000  # 1ペイロードに含める行データの上限(巨大rolloutを分割)
 OPENCODE_MIN_AGE = 300  # 書きかけ応答回避: 最終更新が5分以上前のmessageのみ送る
+OPENCODE_CHUNK_BYTES = 8_000_000  # 1ペイロードに含めるmessage行の上限(初回走査の分割)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -248,6 +250,21 @@ def _opencode_db() -> Path:
     return root / "opencode" / "opencode.db"
 
 
+def _opencode_parts(con, session_id, message_ids):
+    """今回送る message の part だけを取る(セッション全体を読み込まない)。"""
+    parts = {}
+    ids = list(message_ids)
+    for i in range(0, len(ids), 500):   # SQLiteのバインド変数上限に収める
+        batch = ids[i:i + 500]
+        holes = ",".join("?" * len(batch))
+        for p in con.execute(
+                f"SELECT message_id, data FROM part WHERE session_id = ? "
+                f"AND message_id IN ({holes}) ORDER BY time_created, id",
+                [session_id, *batch]):
+            parts.setdefault(p["message_id"], []).append(p["data"])
+    return parts
+
+
 def spool_opencode():
     """opencode セッションの走査。
 
@@ -258,8 +275,10 @@ def spool_opencode():
     増分送信: セッションごとに「送信済みの最大 message.time_created」を
     opencode-sent.jsonl に記録し、それより新しい message だけを送る
     (message は追記のみで書き換わらない)。書きかけの応答を取り込まないよう、
-    最終更新が OPENCODE_MIN_AGE 秒以内の message は次回に回す。
+    最終更新が OPENCODE_MIN_AGE 秒以内の message は次回に回し、透かしも
+    その手前で止める(飛び越すと保留した message が永久に送られない)。
     message.id は DB 全体で一意なので message_uuid にそのまま使える。
+    初回走査の大きなセッションは OPENCODE_CHUNK_BYTES で分割する。
     """
     if exclude is None:
         return  # 除外判定なしで新規収集経路を動かさない(fail-closed)
@@ -276,7 +295,9 @@ def spool_opencode():
             except Exception:
                 pass
 
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+    # パスに ? や # を含んでもURIとして壊れないようエスケープする
+    uri = "file:" + urllib.parse.quote(str(db)) + "?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=5)
     con.row_factory = sqlite3.Row
     try:
         sessions = list(con.execute(
@@ -291,25 +312,32 @@ def spool_opencode():
         for s in sessions:
             sid = s["id"]
             wm = state.get(sid, 0)
+            # 書きかけ(最終更新が新しい)messageの最古の作成時刻。透かしはここを越えない。
+            # time_updatedがNULLの行はtime_createdで代用する(恒久除外を作らない)
+            pending_ms = con.execute(
+                "SELECT min(time_created) FROM message WHERE session_id = ? "
+                "AND time_created > ? AND coalesce(time_updated, time_created) > ?",
+                (sid, wm, cutoff_ms)).fetchone()[0]
+            args = [sid, wm, cutoff_ms]
+            limit_sql = ""
+            if pending_ms is not None:
+                limit_sql = "AND time_created < ? "
+                args.append(pending_ms)
             msgs = list(con.execute(
                 "SELECT id, time_created, time_updated, data FROM message "
-                "WHERE session_id = ? AND time_created > ? AND time_updated <= ? "
-                "ORDER BY time_created, id", (sid, wm, cutoff_ms)))
+                "WHERE session_id = ? AND time_created > ? "
+                "AND coalesce(time_updated, time_created) <= ? " + limit_sql +
+                "ORDER BY time_created, id", args))
             if not msgs:
                 continue
             cwd = s["directory"] or None
             remote = _git_remote(cwd) if cwd and Path(cwd).is_dir() else None
-            new_wm = max(int(m["time_created"]) for m in msgs)
             if not exclude.is_excluded(
                     excludes,
                     project_key=exclude.normalize_project_key(remote, cwd, device),
                     project_dir=cwd):
-                parts_by_msg = {}
-                for p in con.execute(
-                        "SELECT message_id, data FROM part WHERE session_id = ? "
-                        "ORDER BY time_created, id", (sid,)):
-                    parts_by_msg.setdefault(p["message_id"], []).append(p["data"])
-                lines = []
+                parts_by_msg = _opencode_parts(con, sid, [m["id"] for m in msgs])
+                lines = []          # (message.time_created, JSON1行)
                 for m in msgs:
                     try:
                         data = json.loads(m["data"])
@@ -321,16 +349,27 @@ def spool_opencode():
                             parts.append(json.loads(raw))
                         except Exception:
                             pass
-                    lines.append(json.dumps({
+                    lines.append((int(m["time_created"]), json.dumps({
                         "id": m["id"],
                         "time_created": m["time_created"],
                         "message": data,
                         "parts": parts,
-                    }, ensure_ascii=False))
-                if lines:
+                    }, ensure_ascii=False)))
+                # 大きなセッション(初回走査・長期滞留)は1ペイロードに詰め込まない
+                start = 0
+                chunk_from = wm
+                while start < len(lines):
+                    i, acc = start, 0
+                    while i < len(lines):
+                        b = len(lines[i][1].encode("utf-8")) + 1
+                        if i > start and acc + b > OPENCODE_CHUNK_BYTES:
+                            break
+                        acc += b
+                        i += 1
+                    chunk_to = lines[i - 1][0]
                     # 決定的event_id: 同じ(セッション, 送信範囲)は再実行しても二重投入されない
                     event_id = "opencode-" + hashlib.sha1(
-                        f"{device}:{sid}:{wm}:{new_wm}".encode()).hexdigest()
+                        f"{device}:{sid}:{chunk_from}:{chunk_to}".encode()).hexdigest()
                     payload = json.dumps({
                         "device": device,
                         "kind": "transcript",
@@ -342,15 +381,17 @@ def spool_opencode():
                         "project_dir": cwd,
                         "git_remote_url": remote,
                         "git_branch": None,
-                        "transcript": "\n".join(lines),
+                        "transcript": "\n".join(x[1] for x in lines[start:i]),
                         "client_version": None,
                         "captured_at": _iso(now),
                     }, ensure_ascii=False)
                     tmp = pending / (event_id + ".json.tmp")
                     tmp.write_text(payload, encoding="utf-8")
                     tmp.rename(pending / (event_id + ".json"))
+                    chunk_from = chunk_to
+                    start = i
             # 除外分も走査済みとして記録(毎回読み直さない)
-            state[sid] = new_wm
+            state[sid] = max(int(m["time_created"]) for m in msgs)
             changed = True
     finally:
         con.close()

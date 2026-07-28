@@ -125,6 +125,43 @@ class TestSpoolOpencode(unittest.TestCase):
                 parts=[part("prt_1", "msg_1", 1_000, {"type": "text", "text": "途中"})])
         self.assertEqual(self.run_scan(now=10_000.0), [])
 
+    def test_watermark_stops_before_deferred_message(self):
+        """書きかけmessageより後の分を送っても、透かしは書きかけの手前で止める。"""
+        make_db(self.db, messages=[
+            msg("msg_1", 1_000, "assistant", updated=9_999_000),   # 書きかけ(保留)
+            msg("msg_2", 2_000, "user"),                           # 確定済み(後発)
+        ], parts=[part("prt_1", "msg_1", 1_000, {"type": "text", "text": "途中"}),
+                  part("prt_2", "msg_2", 2_000, {"type": "text", "text": "次の指示"})])
+        self.assertEqual(self.run_scan(now=10_000.0), [])  # 保留を飛び越して送らない
+        state = self.home / ".claude-spool" / "opencode-sent.jsonl"
+        self.assertFalse(state.exists())  # 透かしも進めない
+        # 書きかけが確定すれば両方送られる
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE message SET time_updated = 1000 WHERE id = 'msg_1'")
+        con.commit(); con.close()
+        files = self.run_scan(now=10_000.0)
+        ids = [json.loads(x)["id"]
+               for x in json.loads(files[0].read_text(encoding="utf-8"))["transcript"].splitlines()]
+        self.assertEqual(ids, ["msg_1", "msg_2"])
+
+    def test_large_session_is_split(self):
+        """初回走査の大きなセッションは1ペイロードに詰め込まない。"""
+        big = "あ" * 2_000
+        msgs, parts = [], []
+        for i in range(5):
+            msgs.append(msg(f"msg_{i}", 1_000 + i, "user"))
+            parts.append(part(f"prt_{i}", f"msg_{i}", 1_000 + i, {"type": "text", "text": big}))
+        make_db(self.db, messages=msgs, parts=parts)
+        self.mod.OPENCODE_CHUNK_BYTES = 8_000   # 1ペイロードに2件程度
+        files = self.run_scan()
+        self.assertGreater(len(files), 1)
+        got = []
+        for f in files:
+            p = json.loads(f.read_text(encoding="utf-8"))
+            got += [json.loads(x)["id"] for x in p["transcript"].splitlines()]
+        self.assertEqual(sorted(got), sorted(f"msg_{i}" for i in range(5)))  # 全件そろう
+        self.assertEqual(len(got), len(set(got)))                            # 重複しない
+
     def test_excluded_project_is_not_spooled_but_watermarked(self):
         make_db(self.db, directory="/tmp/secret",
                 messages=[msg("msg_1", 1_000_000, "user")],

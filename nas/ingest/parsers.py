@@ -248,7 +248,7 @@ def _render_opencode_parts(parts) -> str:
                 args = json.dumps(args, ensure_ascii=False) if args is not None else ""
             out.append(f"[tool_use:{name}] {args}")
             result = state.get("output")
-            if result:
+            if result is not None:   # 0 や false も結果として残す
                 if not isinstance(result, str):
                     result = json.dumps(result, ensure_ascii=False)
                 out.append(f"[tool_result] {result}")
