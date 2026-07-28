@@ -281,6 +281,74 @@ def haiki_items(f: dict, survivors: int = 0) -> list:
     return items
 
 
+# ---------------------------------------------------------------- 点検・報告(法9条)
+
+def tenken_sql() -> str:
+    """管理簿と実データのずれを点検する材料。
+
+    - 措置未設定(常用でないのに満了日が無い)
+    - 満了しているのに現用のまま(check_manryouが走っていない)
+    - 施行済みなのに管理簿が現用のまま(または逆)
+    """
+    return (
+        "SELECT json_build_object("
+        "'files', (SELECT count(*) FROM record_files), "
+        "'genyou', (SELECT count(*) FROM record_files WHERE state='genyou'), "
+        "'manryou', (SELECT count(*) FROM record_files WHERE state='manryou'), "
+        "'haiki_zumi', (SELECT count(*) FROM record_files WHERE state='haiki_zumi'), "
+        "'ikan_zumi', (SELECT count(*) FROM record_files WHERE state='ikan_zumi'), "
+        "'no_schedule', (SELECT count(*) FROM record_files "
+        "                WHERE measure <> 'jouyou' AND expires_on IS NULL), "
+        "'overdue', (SELECT count(*) FROM record_files "
+        "            WHERE state='genyou' AND expires_on <= current_date), "
+        "'unfiled', (SELECT count(*) FROM record_files "
+        "            WHERE state='manryou' AND disposed_draft IS NULL "
+        "            AND measure <> 'jouyou'));"
+    )
+
+
+def nendo_report_sql(fy: int) -> str:
+    """年度の管理状況(受入・廃棄・移管・滞留)。管理状況報告の別記に使う。"""
+    return (
+        f"SELECT json_build_object("
+        f"'files', (SELECT count(*) FROM record_files WHERE fiscal_year = {int(fy)}), "
+        f"'rows', (SELECT coalesce(sum(n_rows), 0) FROM record_files "
+        f"         WHERE fiscal_year = {int(fy)}), "
+        f"'haiki', (SELECT count(*) FROM record_files "
+        f"          WHERE fiscal_year = {int(fy)} AND state = 'haiki_zumi'), "
+        f"'ikan', (SELECT count(*) FROM record_files "
+        f"         WHERE fiscal_year = {int(fy)} AND state = 'ikan_zumi'), "
+        f"'drafts', (SELECT count(*) FROM drafts WHERE fiscal_year = {int(fy)}), "
+        f"'miketsu', (SELECT count(*) FROM drafts WHERE state = 'pending_decision'), "
+        f"'kouetsu_machi', (SELECT count(*) FROM drafts WHERE seen_state = 'pending' "
+        f"                  AND state IN ('executed','rejected','approved')));"
+    )
+
+
+def tenken_items(st: dict) -> list:
+    """点検結果の「記」の箇条。"""
+    return [
+        f"管理簿に{st.get('files', 0)}ファイル"
+        f"(現用{st.get('genyou', 0)} / 満了{st.get('manryou', 0)} / "
+        f"廃棄済{st.get('haiki_zumi', 0)} / 移管済{st.get('ikan_zumi', 0)})",
+        f"措置未設定 {st.get('no_schedule', 0)}件",
+        f"満了日を過ぎているのに現用のまま {st.get('overdue', 0)}件",
+        f"満了したが廃棄・移管の起票が無い {st.get('unfiled', 0)}件",
+    ]
+
+
+def tenken_problems(st: dict) -> list:
+    """点検で見つかった不整合(空なら異状なし)。"""
+    out = []
+    if st.get("no_schedule"):
+        out.append(f"措置未設定 {st['no_schedule']}件")
+    if st.get("overdue"):
+        out.append(f"満了日超過のまま現用 {st['overdue']}件")
+    if st.get("unfiled"):
+        out.append(f"満了したが未起票 {st['unfiled']}件")
+    return out
+
+
 def rules_sql() -> str:
     """有効な保存期間基準(規程)を読む。"""
     return (

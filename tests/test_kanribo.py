@@ -249,5 +249,92 @@ class TestCheckManryou(unittest.TestCase):
             self.assertEqual(h.mod.check_manryou(run_id=9), [])
 
 
+class TestTenken(unittest.TestCase):
+    def test_tenken_sql_counts_inconsistencies(self):
+        sql = kanribo.tenken_sql()
+        for k in ("no_schedule", "overdue", "unfiled", "genyou", "manryou"):
+            self.assertIn(f"'{k}'", sql)
+        self.assertIn("measure <> 'jouyou' AND expires_on IS NULL", sql)  # 措置未設定
+
+    def test_problems_empty_when_clean(self):
+        self.assertEqual(kanribo.tenken_problems(
+            {"files": 5, "no_schedule": 0, "overdue": 0, "unfiled": 0}), [])
+
+    def test_problems_listed(self):
+        p = kanribo.tenken_problems({"no_schedule": 1, "overdue": 2, "unfiled": 3})
+        self.assertEqual(len(p), 3)
+        self.assertIn("満了日超過のまま現用 2件", p)
+
+    def test_nendo_report_sql_is_year_scoped(self):
+        sql = kanribo.nendo_report_sql(2025)
+        self.assertIn("fiscal_year = 2025", sql)
+        self.assertIn("'haiki'", sql)
+        self.assertIn("'kouetsu_machi'", sql)
+
+
+class TenkenHarness(SeiriHarness):
+    def __init__(self, stats=None, report=None, already_filed="0", today=None, **kw):
+        super().__init__(**kw)
+        self.stats = stats or {"files": 3, "genyou": 3, "manryou": 0, "haiki_zumi": 0,
+                               "ikan_zumi": 0, "no_schedule": 0, "overdue": 0, "unfiled": 0}
+        self.report = report or {"files": 3, "rows": 100, "haiki": 0, "ikan": 0,
+                                 "drafts": 2, "miketsu": 0, "kouetsu_machi": 1}
+        self.filed = already_filed
+        self.today = today or datetime.date(2027, 4, 2)   # 年度替わり直後
+
+    def fake_psql(self, sql):
+        if "'no_schedule'" in sql:
+            self.sqls.append(sql)
+            return json.dumps(self.stats, ensure_ascii=False)
+        if "'kouetsu_machi'" in sql and "fiscal_year =" in sql:
+            self.sqls.append(sql)
+            return json.dumps(self.report, ensure_ascii=False)
+        if "FROM drafts WHERE kind='tenken'" in sql:
+            self.sqls.append(sql)
+            return self.filed
+        return super().fake_psql(sql)
+
+    def run_tenken(self):
+        with self.ctx(), mock.patch.object(self.mod.datetime, "date",
+                                           mock.Mock(today=lambda: self.today,
+                                                     wraps=datetime.date)):
+            return self.mod.tenken(run_id=9)
+
+
+class TestTenkenRun(unittest.TestCase):
+    def test_report_filed_once_at_year_turn(self):
+        h = TenkenHarness()
+        h.mod._DRAFTS_OK = True
+        h.run_tenken()
+        drafts = h.sqls_like("INSERT INTO drafts")
+        self.assertEqual(len(drafts), 1)
+        self.assertIn("'tenken'", drafts[0])
+        self.assertIn("令和8年度", drafts[0])          # 前年度(2026年度)の報告
+        self.assertIn("'general'", drafts[0])
+        # 報告は決裁事項ではない: 供覧(専決)で完結し施行まで進む
+        self.assertTrue(h.sqls_like("decision_class='senketsu'"))
+        self.assertTrue(h.sqls_like("executed_at=now()"))
+
+    def test_report_not_refiled(self):
+        h = TenkenHarness(already_filed="1")
+        h.mod._DRAFTS_OK = True
+        h.run_tenken()
+        self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])
+
+    def test_report_not_filed_outside_year_turn(self):
+        h = TenkenHarness(today=datetime.date(2027, 9, 1))   # 年度替わりを過ぎている
+        h.mod._DRAFTS_OK = True
+        h.run_tenken()
+        self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])
+
+    def test_inconsistencies_do_not_raise(self):
+        h = TenkenHarness(stats={"files": 4, "genyou": 2, "manryou": 2, "haiki_zumi": 0,
+                                 "ikan_zumi": 0, "no_schedule": 1, "overdue": 2,
+                                 "unfiled": 2}, already_filed="1")
+        h.mod._DRAFTS_OK = True
+        out = h.run_tenken()
+        self.assertEqual(out["overdue"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

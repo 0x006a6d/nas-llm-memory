@@ -665,6 +665,65 @@ def ringi_haiki(run_id: int) -> int:
     return n
 
 
+def tenken(run_id: int) -> dict:
+    """点検(法9条・東京都規則56条の2): 管理簿と実データのずれを毎晩調べる。
+
+    不整合があればWARNログに出す(dashboardの注意欄は管理簿の件数から出す)。
+    年度替わりの初回runでは管理状況報告を起票する(決裁は不要。供覧として書庫に残す)。
+    """
+    if not kanribo_ok():
+        return {}
+    st = psql_json(kanribo.tenken_sql())
+    st = st if isinstance(st, dict) else {}
+    problems = kanribo.tenken_problems(st)
+    if problems:
+        log(f"  点検: 不整合 {' / '.join(problems)}")
+    else:
+        log(f"  点検: 異状なし(管理簿{st.get('files', 0)}ファイル)")
+    try:
+        _nendo_report(run_id, st)
+    except Exception as exc:
+        log(f"  WARN 管理状況報告: {type(exc).__name__}: {exc}")
+    return st
+
+
+def _nendo_report(run_id: int, st: dict):
+    """年度の管理状況報告。年度替わり後、その年度で未起票なら1回だけ起票する。"""
+    if not drafts_ok():
+        return
+    today = datetime.date.today()
+    fy = ringi.fiscal_year(today)
+    prev = fy - 1
+    period = f"令和{ringi.reiwa(prev)}年度"
+    filed = psql(f"SELECT count(*) FROM drafts WHERE kind='tenken' "
+                 f"AND payload->>'fiscal_year' = {q(str(prev))};")
+    if filed and int(filed) > 0:
+        return
+    if today.month > 6:      # 年度替わり(4〜6月)を過ぎたら遡って起票しない
+        return
+    rep = psql_json(kanribo.nendo_report_sql(prev))
+    rep = rep if isinstance(rep, dict) else {}
+    items = [
+        f"{period}に整理した行政文書ファイルは{rep.get('files', 0)}件"
+        f"(記録{rep.get('rows', 0)}件)",
+        f"うち廃棄済{rep.get('haiki', 0)}件、移管済{rep.get('ikan', 0)}件",
+        f"{period}に起票した文書は{rep.get('drafts', 0)}件",
+        f"未決{rep.get('miketsu', 0)}件、後閲待ち{rep.get('kouetsu_machi', 0)}件",
+    ]
+    did, doc_no = file_draft("tenken", "general",
+                             ringi.build_title("tenken", period=period),
+                             ringi.build_proposal("tenken", items,
+                                                  [("点検結果", kanribo.tenken_items(st))]),
+                             {"fiscal_year": prev, "report": rep, "tenken": st}, run_id)
+    record_draft(did, "system", "kian", run_id, memo=f"{period}の管理状況")
+    # 報告は決裁事項ではない: 供覧として書庫に残す(専決で完結させ、後閲に回す)
+    advance_draft(did, "pending_review", "shinsa_ok")
+    record_draft(did, "system", "shinsa_ok", run_id, memo="報告のため供覧")
+    advance_draft(did, "approved", "shiko")
+    record_draft(did, "system", "shiko", run_id, memo="管理状況報告を供覧")
+    log(f"  ringi doc {doc_no}: {period}の管理状況報告を供覧")
+
+
 _EDGES_OK = None
 
 
@@ -2295,6 +2354,7 @@ def main(trial: bool = False):
         try:
             seiri(run_id)
             check_manryou(run_id)
+            tenken(run_id)
         except Exception as exc:
             log(f"  WARN 整理: {type(exc).__name__}: {exc}")
 
