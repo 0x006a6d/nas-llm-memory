@@ -66,3 +66,41 @@ class TestShelfOpTransitions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestShelfFilters(unittest.TestCase):
+    """demo判定と本番SQLの条件を揃える(見え方が環境で変わらないように)。"""
+
+    ROWS = [
+        {"id": 1, "kind": "fact", "state": "executed", "seen_state": "seen"},
+        {"id": 2, "kind": "fact", "state": "executed", "seen_state": "pending"},
+        {"id": 3, "kind": "skill", "state": "approved", "seen_state": "pending"},
+        {"id": 4, "kind": "fact", "state": "pending_decision", "seen_state": "pending"},
+        {"id": 5, "kind": "fact", "state": "reexamine", "seen_state": "remanded"},
+    ]
+
+    def _demo_ids(self, filt):
+        rows = [dict(r, doc_no="2026-0001", fiscal_year=2026, seq=1) for r in self.ROWS]
+        with mock.patch.object(server, "DEMO", True), \
+             mock.patch.object(server, "load_json", return_value={"list": rows}):
+            return [r["id"] for r in server.shelf_list(filt, None)]
+
+    def _sql_cond(self, filt):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "sql_json", return_value=[]) as sq:
+            server.shelf_list(filt, None)
+        return sq.call_args[0][0]
+
+    def test_miketsu_is_pending_decision(self):
+        self.assertEqual(self._demo_ids("miketsu"), [4])
+        self.assertIn("state = 'pending_decision'", self._sql_cond("miketsu"))
+
+    def test_pending_excludes_undecided_docs(self):
+        # 未決(pending_decision)は完結していないので後閲待ちに出さない
+        self.assertEqual(self._demo_ids("pending"), [2, 3])
+        self.assertIn("state in ('executed','rejected','approved')",
+                      self._sql_cond("pending"))
+
+    def test_remanded_includes_reexamine(self):
+        self.assertEqual(self._demo_ids("remanded"), [5])
+        self.assertIn("state = 'reexamine'", self._sql_cond("remanded"))

@@ -228,25 +228,126 @@ class TestKessaiBatching(unittest.TestCase):
             self.assertEqual(nums, list(range(len(nums))))
             self.assertEqual(len(nums), 2)
 
-    def test_malformed_batch_falls_back_to_hiketsu(self):
-        """形式不一致の決裁応答は否決へ倒す(未レビューの置換承認を防ぐ。index経路と同じ保守側)"""
+    def test_malformed_batch_is_retried_one_by_one(self):
+        """バッチ応答が件数不一致なら1件ずつ問い直す(それで決まれば未決にしない)。"""
         h = Harness(shortlist=[{"id": 41, "content": "旧事実"}])
         cases = [(cand(f"候補{i}"), {"action": "insert", "replaces": 41}) for i in range(2)]
-        h.scripts["kessai"] = [[{"action": "hiketsu", "memo": "件数不一致"}]]  # 2件に対し1件
+        h.scripts["kessai"] = [
+            [{"action": "hiketsu", "memo": "件数不一致"}],   # 2件に対し1件(不一致)
+            [{"action": "approve", "memo": "単件0"}],        # 問い直し1件目
+            [{"action": "hiketsu", "memo": "単件1"}],        # 問い直し2件目
+        ]
         with h.ctx():
             res = h.mod.judge_kessai("proj", cases, model="mo")
-        self.assertEqual([r["action"] for r in res], ["hiketsu", "hiketsu"])
-        self.assertTrue(all("形式不一致" in r["memo"] for r in res))
+        self.assertEqual([r["action"] for r in res], ["approve", "hiketsu"])
+        self.assertEqual(len([a for a in h.asks if a[0].startswith("kessai")]), 3)
 
-    def test_unknown_kessai_action_becomes_hiketsu(self):
-        """決裁が不明なactionを返した案件は廃案(承認扱いにしない)。"""
+    def test_unparsable_single_case_becomes_miketsu(self):
+        """1件ずつ問い直しても形式不一致なら未決(承認も否決もしない)。"""
+        h = Harness(shortlist=[{"id": 41, "content": "旧事実"}])
+        cases = [(cand("候補X"), {"action": "insert", "replaces": 41})]
+        h.scripts["kessai"] = [{"nonsense": True}]   # 配列でもactionでもない
+        with h.ctx():
+            res = h.mod.judge_kessai("proj", cases, model="mo")
+        self.assertEqual(res[0].get("action"), "miketsu")
+
+    def test_unknown_kessai_action_is_carried_over(self):
+        """規定外のactionは承認も否決もせず、未決文書として繰り越す。"""
         h = Harness(shortlist=[{"id": 41, "content": "旧事実"}])
         h.scripts["shinsa"] = [[{"action": "insert", "replaces": 41, "extends": []}]]
-        h.scripts["kessai"] = [[{"action": "toriaezu_ok"}]]  # 規定外のaction
+        h.scripts["kessai"] = [[{"action": "toriaezu_ok"}],          # 規定外(バッチ)
+                               [{"action": "toriaezu_ok"}]]          # 問い直しも規定外
         ins, drp = h.run([cand("候補X")])
-        self.assertEqual((ins, drp), (0, 1))
+        self.assertEqual((ins, drp), (0, 0))          # 登載も廃案もしない
+        self.assertEqual(h.sqls_like("WITH m AS"), [])  # factsに書かない
+        drafts = h.sqls_like("INSERT INTO drafts")
+        self.assertEqual(len(drafts), 1)
+        self.assertIn('"miketsu": true', drafts[0])   # 未決文書として起票
+        self.assertEqual(h.sqls_like("executed_at=now()"), [])  # 施行しない
+        logs = "\n".join(h.sqls_like("INSERT INTO draft_log"))
+        self.assertIn("'kurikoshi'", logs)
+        self.assertIn("未決繰越", logs)
+
+
+class MiketsuHarness(Harness):
+    """未決文書の再審理(process_miketsu)用。書庫の走査クエリと繰越回数に応える。"""
+
+    def __init__(self, entries, nights=1, config=None):
+        super().__init__(config=config, shortlist=[{"id": 41, "content": "旧事実"}])
+        self.docs = [{"id": 5, "doc_no": "2026-0005", "project_key": "proj",
+                      "payload": {"candidates": entries, "miketsu": True}}]
+        self.nights = nights
+
+    def fake_psql(self, sql):
+        if "payload->>'miketsu'" in sql:
+            self.sqls.append(sql)
+            return json.dumps(self.docs, ensure_ascii=False)
+        if sql.startswith("SELECT count(*) FROM draft_log"):
+            self.sqls.append(sql)
+            return str(self.nights)
+        return super().fake_psql(sql)
+
+    def run_miketsu(self):
+        with self.ctx():
+            return self.mod.process_miketsu(run_id=9)
+
+
+def entry(content="候補X", replaces=41):
+    return {"index": 0, "content": content, "status": "verified", "scope": "project",
+            "provenance": [1], "confidence": 0.9,
+            "shinsa": {"action": "insert", "replaces": replaces, "escalate": False,
+                       "memo": "置換の疑い", "extends": []}}
+
+
+class TestMiketsuCarryOver(unittest.TestCase):
+    def test_approved_next_night_is_executed(self):
+        h = MiketsuHarness([entry()])
+        h.scripts["kessai"] = [[{"action": "approve", "memo": "確認した"}]]
+        touched = h.run_miketsu()
+        self.assertEqual(touched, {"proj"})
+        self.assertTrue(h.sqls_like("WITH m AS"))            # factsへ登載
+        self.assertTrue(h.sqls_like("decision_class='bucho'"))
+        self.assertTrue(h.sqls_like("executed_at=now()"))    # 施行まで進む
+        self.assertTrue(h.sqls_like("INSERT INTO draft_facts"))
+        # payloadの審査判定(replaces=41)が引き継がれている
+        self.assertTrue([s for s in h.sqls_like("WITH m AS") if ", 41," in s])
+
+    def test_rejected_next_night_is_dropped(self):
+        h = MiketsuHarness([entry()])
+        h.scripts["kessai"] = [[{"action": "hiketsu", "memo": "やはり置換不可"}]]
+        self.assertEqual(h.run_miketsu(), set())
+        self.assertEqual(h.sqls_like("WITH m AS"), [])
         self.assertTrue(h.sqls_like("state='rejected'"))
-        self.assertIn("応答形式不一致", "\n".join(h.sqls_like("INSERT INTO draft_log")))
+
+    def test_still_undecided_is_carried_again(self):
+        h = MiketsuHarness([entry()], nights=1)
+        h.scripts["kessai"] = [[{"action": "???"}], [{"action": "???"}]]
+        self.assertEqual(h.run_miketsu(), set())
+        self.assertEqual(h.sqls_like("state='rejected'"), [])   # 廃案にしない
+        self.assertEqual(h.sqls_like("executed_at=now()"), [])  # 施行もしない
+        logs = "\n".join(h.sqls_like("INSERT INTO draft_log"))
+        self.assertIn("'kurikoshi'", logs)
+        self.assertIn("2晩目", logs)
+
+    def test_carry_over_limit_becomes_rejected(self):
+        h = MiketsuHarness([entry()], nights=3)   # 既定の上限(3晩)に到達済み
+        h.scripts["kessai"] = [[{"action": "???"}], [{"action": "???"}]]
+        self.assertEqual(h.run_miketsu(), set())
+        self.assertTrue(h.sqls_like("state='rejected'"))
+        self.assertIn("繰越上限", "\n".join(h.sqls_like("INSERT INTO draft_log")))
+
+    def test_partial_decision_keeps_rest_undecided(self):
+        h = MiketsuHarness([entry("候補A"), entry("候補B")], nights=1)
+        h.scripts["kessai"] = [[{"action": "approve"}, {"action": "???"}],
+                               [{"action": "approve"}], [{"action": "???"}]]
+        touched = h.run_miketsu()
+        self.assertEqual(touched, {"proj"})
+        self.assertEqual(len(h.sqls_like("WITH m AS")), 1)      # 決まった分だけ登載
+        self.assertEqual(h.sqls_like("executed_at=now()"), [])  # 文書は未決のまま
+        upd = [s for s in h.sqls_like("UPDATE drafts") if "jsonb_set" in s]
+        self.assertEqual(len(upd), 1)
+        self.assertIn("候補B", upd[0])       # 残余だけがpayloadに残る
+        self.assertNotIn("候補A", upd[0])
 
 
 class TestFailCompensation(unittest.TestCase):

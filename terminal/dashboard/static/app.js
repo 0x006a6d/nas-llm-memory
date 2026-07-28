@@ -142,6 +142,8 @@ function warnings() {
     text: `未採用のスキル候補が ${sc.length} 件あります(スキルタブで確認。採用するときはセッションで「◯◯ を採用して」)。` });
   if (N.shelf_pending) out.push({ kind: "info", tag: "後閲待ち",
     text: `後閲待ちの決裁文書が ${N.shelf_pending} 件あります(書庫タブで後閲印または差し戻し)。` });
+  if (N.shelf_miketsu) out.push({ kind: "info", tag: "未決",
+    text: `決裁が付かず繰越中の文書が ${N.shelf_miketsu} 件あります(翌晩のバッチが再審理します。書庫タブの「未決(繰越中)」で内容を確認できます)。` });
   const B = S.builtin || {};
   if (B.captured_with && B.current_version && B.captured_with !== B.current_version) {
     out.push({ kind: "info", tag: "内蔵一覧が古い",
@@ -713,6 +715,9 @@ const SHELF_STATE = {
 };
 const SHELF_KIND = { fact: "facts登載", index: "index改定", skill: "skill登載", saishinri: "再審理" };
 const SHELF_SEEN = { pending: ["後閲待ち", "warn"], seen: ["後閲済", "ok"], remanded: ["差し戻し", "err"] };
+// 後閲は完結した文書にだけ意味がある(未決・審査中の文書は後閲待ちではない)
+const seenChip = (d) => (["executed", "rejected", "approved"].includes(d.state)
+  ? chipOf(SHELF_SEEN, d.seen_state) : '<span class="faint">—</span>');
 const SHELF_ACTION = { kian: "起案", hosei: "補正", shinsa_ok: "審査済(専決)", joshin: "上申",
   sashimodoshi: "差し戻し", kessai_ok: "決裁", hiketsu: "否決", shiko: "施行",
   kouetsu: "後閲", saishinri: "再審理", skill_mv: "git移動" };
@@ -728,11 +733,11 @@ function renderShelf(el) {
   const filt = renderShelf._filt || "pending";
   const kind = renderShelf._kind || "";
   el.innerHTML = `
-    <div class="note info"><span class="tag">仕組み</span><span>夜間バッチの判断(facts登載・index改定・skill登載)は起案文書として起票され、審査(課長専決)・決裁(部長)を経て施行されます。人間はここで<b>後閲</b>します: 妥当なら後閲印、問題があれば<b>メモを付けて差し戻し</b> — 翌晩の便で決裁者が再審理し、是正文書を起票します。skillの施行(全端末配布)だけは後閲印が条件です。</span></div>
+    <div class="note info"><span class="tag">仕組み</span><span>夜間バッチの判断(facts登載・index改定・skill登載)は起案文書として起票され、審査(課長専決)・決裁(部長)を経て施行されます。人間はここで<b>後閲</b>します: 妥当なら後閲印、問題があれば<b>メモを付けて差し戻し</b> — 翌晩の便で決裁者が再審理し、是正文書を起票します。skillの施行(全端末配布)だけは後閲印が条件です。決裁が付かなかった案件は<b>未決</b>として繰り越され(承認も廃案もしない)、翌晩に再審理されます。</span></div>
     <h2 class="section">専決規程(モデルの役割分担) — NAS batch/config.json</h2>
     <div class="card" id="kiteiCard"></div>
     <div class="toolrow" style="margin-top:14px" id="shelfFilters">
-      ${[["pending", "後閲待ち"], ["remanded", "差し戻し・再審理中"], ["all", "全件"]].map(([v, l]) =>
+      ${[["pending", "後閲待ち"], ["remanded", "差し戻し・再審理中"], ["miketsu", "未決(繰越中)"], ["all", "全件"]].map(([v, l]) =>
         `<button class="btn mini${filt === v ? "" : " ghost"}" data-f="${v}">${l}</button>`).join("")}
       <select id="shelfKind">
         <option value="">全種別</option>
@@ -768,7 +773,7 @@ function renderShelf(el) {
           <td>${esc(r.title)}</td>
           <td>${r.decision_class ? (r.decision_class === "senketsu" ? "課長専決" : "部長決裁") : "—"}</td>
           <td>${chipOf(SHELF_STATE, r.state)}</td>
-          <td>${chipOf(SHELF_SEEN, r.seen_state)}</td>
+          <td>${seenChip(r)}</td>
           <td class="mono faint" style="white-space:nowrap">${esc(String(r.created_at || "").slice(0, 10))}</td>
         </tr>`).join("")}
       </table>`;
@@ -809,7 +814,7 @@ function renderShelf(el) {
           <span class="chip">${esc(SHELF_KIND[d.kind] || d.kind)}</span>
           ${chipOf(SHELF_STATE, d.state)}
           ${d.decision_class ? `<span class="chip ${d.decision_class === "bucho" ? "warn" : "ok"}">${d.decision_class === "senketsu" ? "課長専決" : "部長決裁"}</span>` : ""}
-          ${chipOf(SHELF_SEEN, d.seen_state)}
+          ${seenChip(d)}
           <span style="flex:1"></span>
           <button class="btn mini ghost" id="docClose">閉じる</button>
         </div>

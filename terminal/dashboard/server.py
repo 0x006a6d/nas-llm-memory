@@ -908,6 +908,7 @@ def nas_snapshot():
             "where rn = 1 order by device, project_key"),
         "batch_config": nas_batch_config(),
         "shelf_pending": shelf_pending_count(),
+        "shelf_miketsu": shelf_miketsu_count(),
         "fetched_at": datetime.now().strftime("%m-%d %H:%M:%S"),
     }
     CACHE_DIR.mkdir(exist_ok=True)
@@ -1023,14 +1024,19 @@ def _stamp_doc_no(row):
 
 
 def shelf_list(filt, kind):
-    """drafts一覧。filt: pending(後閲待ち)|remanded(差し戻し中)|all。"""
+    """drafts一覧。filt: pending(後閲待ち)|remanded(差し戻し中)|miketsu(未決)|all。"""
     if DEMO:
         data = load_json(DEMO_DIR / "shelf.json", {})
         rows = data.get("list", [])
+        # 判定は下のSQLと同じ条件にする(demoと本番で見え方を変えない)
         if filt == "pending":
-            rows = [r for r in rows if r.get("seen_state") == "pending"]
+            rows = [r for r in rows if r.get("seen_state") == "pending"
+                    and r.get("state") in ("executed", "rejected", "approved")]
         elif filt == "remanded":
-            rows = [r for r in rows if r.get("seen_state") == "remanded"]
+            rows = [r for r in rows if r.get("seen_state") == "remanded"
+                    or r.get("state") == "reexamine"]
+        elif filt == "miketsu":
+            rows = [r for r in rows if r.get("state") == "pending_decision"]
         if kind:
             rows = [r for r in rows if r.get("kind") == kind]
         return [_stamp_doc_no(dict(r)) for r in rows]
@@ -1040,6 +1046,9 @@ def shelf_list(filt, kind):
         cond = "seen_state = 'pending' and state in ('executed','rejected','approved')"
     elif filt == "remanded":
         cond = "seen_state = 'remanded' or state = 'reexamine'"
+    elif filt == "miketsu":
+        # 未決 = 決裁が付かず翌晩へ繰り越し中の文書(承認でも廃案でもない)
+        cond = "state = 'pending_decision'"
     if kind:
         cond = f"({cond}) and kind = {dollar_quote(kind)}"
     return [_stamp_doc_no(r) for r in sql_json(
@@ -1127,6 +1136,15 @@ def shelf_pending_count():
     try:
         out = run_sql("select count(*) from drafts where seen_state='pending' "
                       "and state in ('executed','rejected','approved');")
+        return int(out or 0)
+    except Exception:  # noqa: BLE001 — drafts未適用環境
+        return None
+
+
+def shelf_miketsu_count():
+    """未決(決裁が付かず繰越中)の文書数。012未適用ならNone。"""
+    try:
+        out = run_sql("select count(*) from drafts where state='pending_decision';")
         return int(out or 0)
     except Exception:  # noqa: BLE001 — drafts未適用環境
         return None

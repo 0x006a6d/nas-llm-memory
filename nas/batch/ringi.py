@@ -24,6 +24,7 @@ RINGI_DEFAULTS = {
     "skill_min_count": 2,        # skills-candidates を起票する検出回数の下限
     "skill_auto_execute": False, # true: skillも決裁即施行(後閲印を施行条件にしない)
     "index_delete_ratio": 0.3,   # index改定で削除行がこの割合を超えたら上申
+    "max_miketsu_nights": 3,     # 決裁不能案件を未決のまま繰り越す上限(超過で廃案)
 }
 
 
