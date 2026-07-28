@@ -661,7 +661,7 @@ def _spool_config():
 
 
 def spool_state():
-    """~/.claude-spool の実接続設定と送信キューの状態(収集タブ表示用)。
+    """~/.claude-spool の実接続設定と送信キューの状態(収受簿タブ表示用)。
 
     api_token は生値を返さない。端末間の設定照合ができるよう sha256 指紋の先頭だけ返す
     (TLS 証明書も同様。全端末で同じ指紋になっていれば同じ設定を向いている)。
@@ -771,7 +771,7 @@ def list_messages():
 
 
 def codex_agents_state():
-    """Codex への index 配布物の生成状態(コンテキストタブ表示用)。
+    """Codex への index 配布物の生成状態(例規タブ表示用)。
 
     agents_sync.py が sender 実行時に生成する ~/.codex/AGENTS.md の管理セクションと、
     登録プロジェクト(~/.claude-spool/codex-projects.json)の AGENTS.override.md を確認する。
@@ -897,7 +897,7 @@ def nas_snapshot():
             "select distinct on (project_key) project_key, device, count(*) n "
             "from turns group by project_key, device "
             "order by project_key, n desc"),
-        # 配布タブ用: device×projectごとの最頻cwd(ルーティング宣言のパス候補)
+        # 配付先タブ用: device×projectごとの最頻cwd(ルーティング宣言のパス候補)
         "device_projects": sql_json(
             "select device, project_key, cwd, n from ("
             "select device, project_key, cwd, count(*) n, "
@@ -1002,7 +1002,7 @@ def fact_op(op, project, content, fact_id):
     return run_sql(sql)
 
 
-# ---------------------------------------------------------------- 書架(起案・決裁文書)
+# ---------------------------------------------------------------- 書庫(起案・決裁文書)
 
 def _doc_no_disp(fy, seq):
     """表示用文書番号(記憶第N号(令和X年度)。令和元年度は「元」)。
@@ -1123,7 +1123,7 @@ def shelf_op(op, draft_id, memo):
 
 
 def shelf_pending_count():
-    """後閲待ち文書数(概要タブの注意欄用)。012未適用ならNone。"""
+    """後閲待ち文書数(文書事務概況タブの注意欄用)。012未適用ならNone。"""
     try:
         out = run_sql("select count(*) from drafts where seen_state='pending' "
                       "and state in ('executed','rejected','approved');")

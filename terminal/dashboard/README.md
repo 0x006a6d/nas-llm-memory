@@ -22,17 +22,17 @@ NAS への問い合わせは `ssh nas`(~/.ssh/config)経由。NAS 系データ�
 ## タブ構成(パイプライン順)
 
 システムの本質は「収集 → 蒸留 → index 生成 → 配布・注入」のパイプラインで、
-タブはこの順に並ぶ。概要タブ冒頭の全体図が各段の実数と入口になる。
+タブはこの順に並ぶ。文書事務概況タブ冒頭の全体図が各段の実数と入口になる。
 
-- 概要         — パイプライン全体図(各段の実数とタブへのリンク)、毎セッション注入される
+- 文書事務概況 — パイプライン全体図(各段の実数とタブへのリンク)、毎セッション注入される
                  コンテキストの内訳(64KiB バジェットに対する使用率ドーナツ)、
                  turns/facts 件数、hook の重複登録などの自動検出
-- 収集         — sync-exclude.txt の編集、crontab、バッチ実行履歴、リポジトリ状態
-                 (収集段の管理と健全性確認)
-- 記録 (facts) — current_facts の閲覧と 追加/修正/撤去、turns の PGroonga 全文検索、
+- 収受簿       — sync-exclude.txt の編集、crontab、バッチ実行履歴、リポジトリ状態
+                 (収受段の管理と健全性確認)
+- 事実原簿     — current_facts の閲覧と 追加/修正/撤去、turns の PGroonga 全文検索、
                  重要な会話のフラグ付け(NAS flags テーブル、session_id 単位、全端末共通)、
                  auto memory スナップショット(各端末の内蔵メモリ取り込み履歴)の閲覧
-- 書架 (決裁)  — 起案・決裁ワークフロー(ringi)の完結文書の閲覧と後閲。文書番号・決裁欄・
+- 書庫 (決裁済)— 起案・決裁ワークフロー(ringi)の完結文書の閲覧と後閲。文書番号・決裁欄・
                  伺い文・回議録・登載 facts を表示し、後閲印またはメモ付き差し戻し
                  (差し戻しは翌晩の便で決裁者が再審理)。skill 文書は後閲印が施行の条件。
                  専決規程(NAS batch/config.json の roles / ringi 主要フラグ)の編集も
@@ -52,14 +52,14 @@ NAS への問い合わせは `ssh nas`(~/.ssh/config)経由。NAS 系データ�
                  (実処理は hooks/hooks_apply.py。SessionStart でも自動適用)。
                  加えて settings.json・各プラグイン・~/.codex/hooks.json の実登録を
                  イベント別に集約表示。コンテキスト注入 hook は本文を琥珀枠で表示
-- コンテキスト — CLAUDE.md と memory/*/index.md の閲覧・編集(バイトゲージ付き)。
+- 例規(常用文書)— CLAUDE.md と memory/*/index.md の閲覧・編集(バイトゲージ付き)。
                  一覧は「毎セッション注入 / この端末のプロジェクト / 他端末」に
                  グループ分け。Codex 側配布(~/.codex/AGENTS.md 管理セクションと
                  各登録プロジェクトの AGENTS.override.md)の生成状態表も出す
-- 配布         — routing.json の端末×プロジェクト マトリクス編集(どの端末にどの
+- 配付先       — routing.json の端末×プロジェクト マトリクス編集(どの端末にどの
                  プロジェクトの index を注入するか)
-- 申し送り     — 端末/プロジェクト宛の一度きりのメッセージ送信と履歴
-- 使用量       — Claude Code のテレメトリ集計(コスト/トークン/セッション/日別・端末別・
+- 事務引継     — 端末/プロジェクト宛の一度きりのメッセージ送信と履歴
+- 予算執行     — Claude Code のテレメトリ集計(コスト/トークン/セッション/日別・端末別・
                  モデル別)。各端末が OTLP で NAS の otel-collector に送り、NAS の
                  Prometheus(9090)に保存されたものを HTTP API で集計する。ホストは
                  ~/.claude-spool/config.json の ingest_url から導出(IP はコードに置かない)
@@ -67,7 +67,7 @@ NAS への問い合わせは `ssh nas`(~/.ssh/config)経由。NAS 系データ�
 ## 編集の意味論(重要)
 
 - index.md は夜間バッチ(03:00)が current_facts から**全再生成**する。直接編集は即効だが
-  翌バッチで上書きされる。恒久的な調整は「記憶 (facts)」タブで行うこと。
+  翌バッチで上書きされる。恒久的な調整は「事実原簿」タブで行うこと。
 - facts の操作は nightly の規約に合わせている:
   - 追加 = INSERT(replaces=NULL, created_by=dashboard-日付)
   - 修正 = 新 fact を INSERT し replaces=旧id(置換連鎖)

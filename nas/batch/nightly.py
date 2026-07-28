@@ -1059,7 +1059,7 @@ def judge_kessai(key: str, cases: list, model: str) -> list:
             # 形式不一致は否決へ倒す: 置換・矛盾疑いの重要案件を未レビューで承認しない
             # (index経路の「形式不一致は現行維持」、補正ループの「形式不一致は取り下げ」
             # と同じ保守側。否決された候補は再起票されないので、決裁モデルの不調は
-            # 上申案件のまとめ廃案として書架に見える)
+            # 上申案件のまとめ廃案として書庫に見える)
             sub = [{"action": "hiketsu", "memo": "応答形式不一致"} for _ in batch]
         for j, i in enumerate(batch):
             res[i] = sub[j] if isinstance(sub[j], dict) \
@@ -1158,7 +1158,7 @@ KESSAI_INDEX_PROMPT = """あなたはindex改定の決裁者(部長)です。プ
 出力は次のJSONのみ(説明文なし):
 {{"action": "approve"|"hiketsu", "memo": "理由(1文)"}}
 - approve: 改定を承認する(削除は妥当)
-- hiketsu: 改定を見送る(現行indexを維持。書架の後閲で差し戻し・再審理できる)
+- hiketsu: 改定を見送る(現行indexを維持。書庫の後閲で差し戻し・再審理できる)
 
 ## 現行→改定案の差分(unified diff)
 {diff}
@@ -1436,7 +1436,7 @@ def _file_skill_doc(name: str, meta: dict, skill_md: str, run_id: int,
         if settings["skill_auto_execute"]:
             execute_skill_doc(did, name, run_id)
         else:
-            log(f"  ringi doc {doc_no} (skill {name}): 決裁済み。施行は書架の後閲印待ち")
+            log(f"  ringi doc {doc_no} (skill {name}): 決裁済み。施行は書庫の後閲印待ち")
     except Exception:
         # 途中失敗の文書を審理中のまま残さない(runは続行し、候補は将来再起票できる)
         try:
@@ -1617,7 +1617,7 @@ def _saishinri_one(row: dict, run_id: int, model: str) -> set:
 
 
 def process_remands(run_id: int) -> set:
-    """書架の後閲キューを処理する(run冒頭、watermark処理とは独立)。
+    """書庫の後閲キューを処理する(run冒頭、watermark処理とは独立)。
 
     - kind='skill', state='approved', seen_state='seen': 後閲印済みskillの施行(git mv+push)
     - state='reexamine': 人間の差し戻し。決裁者が原文書+回議録+メモで再審理し、
@@ -1877,7 +1877,7 @@ def main(trial: bool = False):
         total_inserted = total_dropped = 0
         touched_keys = set()
 
-        # 書架の後閲キュー(後閲印済みskillの施行・差し戻しの再審理)と
+        # 書庫の後閲キュー(後閲印済みskillの施行・差し戻しの再審理)と
         # skill登載伺い(scout候補の起票→審査→決裁。施行は後閲印待ちが既定)。
         # どちらも補助系なので失敗は本体パイプラインへ波及させない
         if ringi_on:
