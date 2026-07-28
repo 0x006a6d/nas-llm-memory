@@ -55,6 +55,21 @@
 
 適用は 2 段階: コードを deploy しても `enabled` が立つまで挙動は変わらないので、先に配置して従来動作を確認してから config を切り替える。専決規程 (roles と主要フラグ) は dashboard の書庫タブからも変更できる (翌晩から反映)。
 
+## 整理と管理簿 (公文書管理法5〜7条)
+
+収集した記録は、分類・名称・保存期間・保存期間の満了する日・満了時の措置を与えて「行政文書ファイル」(集合物) にまとめ、管理簿に載せる (整理)。措置は満了より前に決めておく (レコードスケジュール)。
+
+- 集合物の単位 — `(大分類, 中分類 = project_key, 期間)`。個々の行に保存期間を持たせない (法5条の「一の集合物にまとめる」に合わせ、廃棄・移管も集合物単位で行う)
+- 期間の切り方 — 保存期間が年単位なら**年度** (4/1 区切り)、日単位なら**月**。日単位を年度でまとめると、その年度に行が入り続ける限り満了しないため月で締める
+- 満了する日 — 年度起算は「作成年度の翌年度初めから N 年」= (年度+1+N)/3/31、日起算は「その月の末日から N 日」
+- 標準文書保存期間基準 — `retention_rules` テーブルが規程の正 (大分類 → 保存期間・満了時の措置・施行ゲート)。`enabled` で 1 分類ずつ適用する。初期値は raw_payloads 90日 / turns 3年 / auto_memory 1年 / facts 常用 / drafts 10年で移管 / messages 1年 / batch_runs 3年
+- 管理簿 — `record_files`。dashboard の「管理簿」タブが分類・名称・保存期間・満了する日・措置・件数・保存場所・状態を表示する (閲覧のみ。操作は夜間バッチ)
+- どのテーブルをどう束ねるかは `batch/kanribo.py` の `SOURCES` が正で、規程 (015 の初期値) との一致は `tests/test_kanribo.py` が検査する
+
+整理は夜間バッチの run 冒頭で行う (`seiri()`)。既存のパイプラインには触れず、失敗しても本体へ波及させない。
+
+満了したファイルは措置に従って処理する。廃棄は必ず起案文書 (廃棄伺い) を通し、審査・決裁を経てから施行する。現用 facts の根拠になっている turns、watermark を持つ最新の成功 run、raw_payloads の受信証跡は保存期間が満了しても残す。施行の条件 (決裁で施行 / 人間の後閲印が条件) は分類ごとに規程で定める。運用の全体は `docs/bunsho-kanri.md` (文書管理規程) にまとめてある。
+
 ## 運用して踏んだ罠と対策 (実装済み)
 
 1. 自己増殖ループ。バッチ自身の `claude -p` セッションが SessionEnd hook で収集されてしまう。バッチは `CLAUDE_SPOOL_SKIP=1` を付けて claude を起動し、spool_write.py の冒頭でスキップする
@@ -73,7 +88,7 @@ for f in ingest/schema/001_init.sql ingest/schema/003_p2.sql \
          ingest/schema/008_reader.sql ingest/schema/009_edges.sql \
          ingest/schema/010_messages.sql ingest/schema/011_retired.sql \
          ingest/schema/012_ringi.sql ingest/schema/013_ringi_fixup.sql \
-         ingest/schema/014_miketsu.sql; do
+         ingest/schema/014_miketsu.sql ingest/schema/015_kanribo.sql; do
   docker compose exec -T db psql -U claude -d claude_memory -v ON_ERROR_STOP=1 -f - < "$f"
 done
 ```

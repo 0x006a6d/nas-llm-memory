@@ -29,7 +29,7 @@ NAS への問い合わせは `ssh nas`(~/.ssh/config)経由。NAS 系データ�
                  turns/facts 件数、hook の重複登録などの自動検出
 - 収受簿       — sync-exclude.txt の編集、crontab、バッチ実行履歴、リポジトリ状態
                  (収受段の管理と健全性確認)
-- 事実原簿     — current_facts の閲覧と 追加/修正/撤去、turns の PGroonga 全文検索、
+- 現用文書     — current_facts の閲覧と 追加/修正/撤去、turns の PGroonga 全文検索、
                  重要な会話のフラグ付け(NAS flags テーブル、session_id 単位、全端末共通)、
                  auto memory スナップショット(各端末の内蔵メモリ取り込み履歴)の閲覧
 - 書庫 (決裁済)— 起案・決裁ワークフロー(ringi)の完結文書の閲覧と後閲。文書番号・決裁欄・
@@ -68,7 +68,7 @@ NAS への問い合わせは `ssh nas`(~/.ssh/config)経由。NAS 系データ�
 ## 編集の意味論(重要)
 
 - index.md は夜間バッチ(03:00)が current_facts から**全再生成**する。直接編集は即効だが
-  翌バッチで上書きされる。恒久的な調整は「事実原簿」タブで行うこと。
+  翌バッチで上書きされる。恒久的な調整は「現用文書」タブで行うこと。
 - facts の操作は nightly の規約に合わせている:
   - 追加 = INSERT(replaces=NULL, created_by=dashboard-日付)
   - 修正 = 新 fact を INSERT し replaces=旧id(置換連鎖)

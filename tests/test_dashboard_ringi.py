@@ -104,3 +104,66 @@ class TestShelfFilters(unittest.TestCase):
     def test_remanded_includes_reexamine(self):
         self.assertEqual(self._demo_ids("remanded"), [5])
         self.assertIn("state = 'reexamine'", self._sql_cond("remanded"))
+
+
+class TestKanriboFilters(unittest.TestCase):
+    """管理簿も demo判定と本番SQLの条件を揃える。"""
+
+    ROWS = [
+        {"id": 1, "category": "shuju-raw", "state": "manryou", "expires_on": "2026-07-29"},
+        {"id": 2, "category": "shuju-raw", "state": "genyou", "expires_on": "2999-01-01"},
+        {"id": 3, "category": "shuju-turns", "state": "genyou", "expires_on": "2000-01-01"},
+        {"id": 4, "category": "kessai-doc", "state": "ikan_zumi", "expires_on": "2026-01-01"},
+        {"id": 5, "category": "kiroku-fact", "state": "genyou", "expires_on": None},
+    ]
+
+    def _demo_ids(self, filt, category=""):
+        with mock.patch.object(server, "DEMO", True), \
+             mock.patch.object(server, "load_json", return_value={"list": self.ROWS}):
+            return [r["id"] for r in server.kanribo_list(filt, category)]
+
+    def _sql(self, filt, category=""):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "sql_json", return_value=[]) as sq:
+            server.kanribo_list(filt, category)
+        return sq.call_args[0][0]
+
+    def test_genyou(self):
+        self.assertEqual(self._demo_ids("genyou"), [2, 3, 5])
+        self.assertIn("state = 'genyou'", self._sql("genyou"))
+
+    def test_manryou_includes_expired_genyou(self):
+        # 満了状態の行 + 現用だが満了日を過ぎた行
+        self.assertEqual(self._demo_ids("manryou"), [1, 3])
+        sql = self._sql("manryou")
+        self.assertIn("state = 'manryou'", sql)
+        self.assertIn("expires_on <= current_date", sql)
+
+    def test_sumi(self):
+        self.assertEqual(self._demo_ids("sumi"), [4])
+        self.assertIn("state in ('haiki_zumi','ikan_zumi')", self._sql("sumi"))
+
+    def test_category_filter(self):
+        self.assertEqual(self._demo_ids("all", "shuju-raw"), [1, 2])
+        self.assertIn("category = ", self._sql("all", "shuju-raw"))
+
+    def test_jouyou_never_counted_as_expired(self):
+        # 満了日NULL(常用)は満了に出ない
+        self.assertNotIn(5, self._demo_ids("manryou"))
+
+
+class TestKanriboCounts(unittest.TestCase):
+    def test_manryou_count_matches_list_condition(self):
+        """概況の満了件数と管理簿一覧のフィルタが同じ条件であること。"""
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "run_sql", return_value="3|1|0") as rs:
+            out = server.kanribo_counts()
+        sql = rs.call_args[0][0]
+        self.assertIn("state='manryou'", sql)                 # 満了に進んだ分も数える
+        self.assertIn("expires_on <= current_date", sql)      # まだ現用の満了分も数える
+        self.assertEqual(out, {"genyou": 3, "manryou": 1, "sumi": 0})
+
+    def test_counts_none_when_schema_absent(self):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "run_sql", side_effect=RuntimeError("no table")):
+            self.assertIsNone(server.kanribo_counts())

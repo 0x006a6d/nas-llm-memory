@@ -116,7 +116,7 @@ def insert_draft_sql(*, kind: str, project_key: str, title: str, proposal: str,
     起票の初期状態は pending_review 固定(呼び出し側から任意の状態で作らせない。
     以後の状態は必ず transition_sql のガード付きUPDATEを通す)。
     """
-    if kind not in ("fact", "skill", "index", "saishinri"):
+    if kind not in ("fact", "skill", "index", "saishinri", "haiki", "ikan", "tenken"):
         raise ValueError(f"invalid kind: {kind}")
     fy = int(fy)
     rel = str(int(related_doc)) if related_doc is not None else "NULL"
@@ -187,6 +187,9 @@ _TITLES = {
     "index": "プロジェクト {project} の index 改定について(伺い)",
     "skill": "スキル「{name}」の登載について(伺い)",
     "saishinri": "文書 {doc_no} の後閲差し戻しに伴う是正について(伺い)",
+    "haiki": "行政文書ファイル「{name}」の廃棄について(伺い)",
+    "ikan": "行政文書ファイル「{name}」の移管について(伺い)",
+    "tenken": "{period} の文書管理状況について(報告)",
 }
 
 _ASKS = {
@@ -194,6 +197,9 @@ _ASKS = {
     "index": "標記について、下記のとおり index を改定してよろしいか。",
     "skill": "標記について、下記のスキルを skills 本体に登載してよろしいか。",
     "saishinri": "標記について、後閲による差し戻しを受け、下記のとおり是正してよろしいか。",
+    "haiki": "標記について、保存期間が満了したので、下記のとおり廃棄してよろしいか。",
+    "ikan": "標記について、保存期間が満了したので、下記のとおり移管してよろしいか。",
+    "tenken": "標記について、下記のとおり報告する。",
 }
 
 
