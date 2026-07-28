@@ -198,6 +198,89 @@ def pending_measure_sql() -> str:
     )
 
 
+# ---------------------------------------------------------------- 廃棄(法8条2項)
+
+def dispose_sql(f: dict, draft_id: int) -> str:
+    """1ファイルの廃棄を実行するSQL。返り値は RETURNING で消えた件数を返す1文。
+
+    分類ごとに実体が違うので消し方も変える:
+    - shuju-raw : 本文(payload)だけ廃棄して行は残す。turns.payload_id のFKが
+      NO ACTION で行削除できないうえ、いつ何を廃棄したかの証跡も残したい
+    - shuju-turns: 行削除。ただし**現用factsの根拠(provenance)になっている行は残す**
+      (根拠の消えた事実を作らない = 現用文書は廃棄しない)
+    - その他: 行削除。batch_runs は watermark を持つ最新の成功runを必ず残す
+
+    範囲は管理簿の id_from〜id_to(整理で確定済み)に限定し、中分類(project_key)でも絞る。
+    """
+    cat = f["category"]
+    src = SOURCES[cat]
+    lo, hi = int(f["id_from"]), int(f["id_to"])
+    key = f["project_key"]
+    if cat == "shuju-raw":
+        return (
+            f"WITH d AS (UPDATE raw_payloads SET payload = '{{}}'::jsonb, "
+            f"disposed_at = now(), disposed_draft = {int(draft_id)} "
+            f"WHERE id BETWEEN {lo} AND {hi} AND disposed_at IS NULL RETURNING id) "
+            f"SELECT count(*) FROM d;"
+        )
+    if cat == "shuju-turns":
+        return (
+            f"WITH d AS (DELETE FROM turns t WHERE t.id BETWEEN {lo} AND {hi} "
+            f"AND t.project_key = {q(key)} "
+            f"AND NOT EXISTS (SELECT 1 FROM current_facts cf "
+            f"WHERE t.id = ANY(cf.provenance)) RETURNING t.id) "
+            f"SELECT count(*) FROM d;"
+        )
+    if cat == "unyou-run":
+        return (
+            f"WITH d AS (DELETE FROM batch_runs b WHERE b.id BETWEEN {lo} AND {hi} "
+            f"AND coalesce(b.project_key, 'general') = {q(key)} "
+            f"AND b.finished_at IS NOT NULL "
+            f"AND (b.watermark_turn_id IS NULL OR b.watermark_turn_id < "
+            f"(SELECT max(watermark_turn_id) FROM batch_runs WHERE status = 'success')) "
+            f"RETURNING b.id) SELECT count(*) FROM d;"
+        )
+    return (
+        f"WITH d AS (DELETE FROM {src['table']} x WHERE x.id BETWEEN {lo} AND {hi} "
+        f"AND {src['key'].replace('to_project', 'x.to_project')} = {q(key)} "
+        f"RETURNING x.id) SELECT count(*) FROM d;"
+    )
+
+
+def survivors_sql(f: dict) -> str:
+    """廃棄しても残る行(= 現用factsの根拠になっているturns)の件数。伺い文に載せる。"""
+    if f["category"] != "shuju-turns":
+        return ""
+    return (
+        f"SELECT count(*) FROM turns t WHERE t.id BETWEEN {int(f['id_from'])} "
+        f"AND {int(f['id_to'])} AND t.project_key = {q(f['project_key'])} "
+        f"AND EXISTS (SELECT 1 FROM current_facts cf WHERE t.id = ANY(cf.provenance));"
+    )
+
+
+def disposed_sql(file_id: int, draft_id: int, n: int, state: str = "haiki_zumi") -> str:
+    """管理簿に施行の結果を記載する。"""
+    return (
+        f"UPDATE record_files SET state = {q(state)}, disposed_draft = {int(draft_id)}, "
+        f"n_rows = {int(n)}, updated_at = now() WHERE id = {int(file_id)} RETURNING id;"
+    )
+
+
+def haiki_items(f: dict, survivors: int = 0) -> list:
+    """廃棄伺いの「記」の箇条(件名・数量・保存期間・満了日を明示する)。"""
+    items = [
+        f"分類 {f['category']}・ファイル「{f['name']}」を廃棄する",
+        f"保存期間は{('満了日 ' + str(f['expires_on'])[:10]) if f.get('expires_on') else '常用'}"
+        f"をもって満了している",
+        f"対象は{f['n_rows']}件(id {f['id_from']}〜{f['id_to']}、保存場所 {f['location']})",
+    ]
+    if f["category"] == "shuju-raw":
+        items.append("廃棄は本文のみとし、受信記録の行と受信日時は証跡として残す")
+    if survivors:
+        items.append(f"うち{survivors}件は現用の事実の根拠(provenance)のため廃棄しない")
+    return items
+
+
 def rules_sql() -> str:
     """有効な保存期間基準(規程)を読む。"""
     return (

@@ -780,7 +780,8 @@ const SHELF_STATE = {
   approved: ["決裁済(施行前)", "blue"], executed: ["施行済", "ok"],
   rejected: ["廃案", "err"], reexamine: ["再審理待ち", "warn"],
 };
-const SHELF_KIND = { fact: "facts登載", index: "index改定", skill: "skill登載", saishinri: "再審理" };
+const SHELF_KIND = { fact: "facts登載", index: "index改定", skill: "skill登載", saishinri: "再審理",
+  haiki: "廃棄", ikan: "移管", tenken: "管理状況報告" };
 const SHELF_SEEN = { pending: ["後閲待ち", "warn"], seen: ["後閲済", "ok"], remanded: ["差し戻し", "err"] };
 // 後閲は完結した文書にだけ意味がある(未決・審査中の文書は後閲待ちではない)
 const seenChip = (d) => (["executed", "rejected", "approved"].includes(d.state)
