@@ -49,6 +49,7 @@
 - 専決規程 — 役割ごとに担当モデルを分掌する。`roles.kian` = 起案 (turns から事実候補を調べ上げる係員)、`roles.shinsa` = 審査 (既存 facts と照合する課長。軽易案件はここで専決)、`roles.kessai` = 決裁 (部長。既存 fact の置換・撤回・矛盾疑いの上申案件のみ)、`roles.enrich` = index 生成。上申するかどうかはコード側の機械判定で、モデルの裁量にしない
 - 起案文書 — facts 登載・index 改定・skill 登載の判断を 1 件ずつ伺い文 (「下記のとおり登載してよろしいか」+ 別記) 付きの文書として起票し、年度別連番の文書番号を採番して `drafts` に保存する。処理履歴は回議録 (`draft_log`) に残る
 - 差し戻し — 全階層共通で「メモを付与して前の担当者に戻す」。審査→起案者 (内容不備の補正指示、上限往復数超過で廃案)、決裁→審査 (再判定)、人間の後閲→決裁者 (翌晩の便で再審理し、是正の saishinri 文書を起票する)
+- 未決繰越 — 決裁者の応答が形式不一致で決裁が付かない案件は、承認 (未レビューの置換が通る) にも否決 (watermark が進むので候補が二度と起票されない) にも倒さず、**未決**の文書として `pending_decision` のまま残す。まず 1 件ずつ問い直し、それでも決まらなければ翌晩の便が payload (候補本文と審査判定) から再審理する。決まった案件から順に施行し、残りは繰越を重ねて `ringi.max_miketsu_nights` (既定 3 晩) を超えたら廃案にする
 - 後閲 — バッチは無人で施行まで進み (代決)、人間は dashboard の書庫タブで事後確認する。後閲印または差し戻し。skill の施行 (skills/ 本体への登載 = 全端末配布) だけは人間の後閲印を施行条件とする (`ringi.skill_auto_execute` で解除可)
 - 試行 (第 1 期) — `ringi.trial` または `nightly.py --trial` で、起案候補モデル (`ringi.trial_models`) を本番 run の内側で並行実行し、審査モデルの突合で拾い漏れ率・誤拾い率を `batch/trial/summary.md` に実測する。facts には入れない。数晩の実測で `roles.kian` を決めてから `enabled` を入れる想定。所要時間は `ringi.trial_budget_min` (既定 25 分) で打ち止めし、04:00 チェーンの欠測を防ぐ (見送り・切り落とし分は突合表に記録される)
 
@@ -71,7 +72,8 @@ for f in ingest/schema/001_init.sql ingest/schema/003_p2.sql \
          ingest/schema/006_agent.sql ingest/schema/007_originator.sql \
          ingest/schema/008_reader.sql ingest/schema/009_edges.sql \
          ingest/schema/010_messages.sql ingest/schema/011_retired.sql \
-         ingest/schema/012_ringi.sql ingest/schema/013_ringi_fixup.sql; do
+         ingest/schema/012_ringi.sql ingest/schema/013_ringi_fixup.sql \
+         ingest/schema/014_miketsu.sql; do
   docker compose exec -T db psql -U claude -d claude_memory -v ON_ERROR_STOP=1 -f - < "$f"
 done
 ```

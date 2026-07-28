@@ -1019,6 +1019,26 @@ def hosei_candidates(project: str, pairs: list, model: str) -> list:
             for r in res]
 
 
+# 決裁が付かなかった案件の印。承認でも否決でもなく、未決文書として翌晩へ繰り越す
+MIKETSU = {"action": "miketsu", "memo": "応答形式不一致"}
+
+
+def _judge_kessai_one(key: str, text: tuple, model: str) -> dict:
+    """1案件だけの決裁プロンプト(バッチ応答が形式不一致だったときの問い直し)。"""
+    content, rest = text
+    out = ask_claude(KESSAI_PROMPT.format(blocks=f"[0] 候補: {content}\n{rest}"),
+                     f"kessai:{key}", model=model)
+    try:
+        res = extract_json(out, f"kessai:{key}")
+    except RuntimeError:
+        return dict(MIKETSU)
+    if isinstance(res, list) and len(res) == 1 and isinstance(res[0], dict):
+        return res[0]
+    if isinstance(res, dict):   # 単件では配列でなく素のオブジェクトで返ることがある
+        return res
+    return dict(MIKETSU)
+
+
 def judge_kessai(key: str, cases: list, model: str) -> list:
     """上申案件の決裁。cases=[(候補, 審査判定dict), ...]。返り値は同数・同順のdict列。
 
@@ -1038,7 +1058,7 @@ def judge_kessai(key: str, cases: list, model: str) -> list:
         lines += [f"    [{s['id']}] {s['content']}" for s in sl] or ["    (なし)"]
         texts.append((c["content"], "\n".join(lines)))
 
-    res: list = [{"action": "hiketsu", "memo": "応答形式不一致"} for _ in cases]
+    res: list = [dict(MIKETSU) for _ in cases]
     overhead = len(KESSAI_PROMPT)
     pos = 0
     while pos < len(texts):
@@ -1054,16 +1074,20 @@ def judge_kessai(key: str, cases: list, model: str) -> list:
             pos += 1
         out = ask_claude(KESSAI_PROMPT.format(blocks="\n\n".join(blocks)),
                          f"kessai:{key}", model=model)
-        sub = extract_json(out, f"kessai:{key}")
+        try:
+            sub = extract_json(out, f"kessai:{key}")
+        except RuntimeError:
+            sub = None
+        if (not isinstance(sub, list) or len(sub) != len(batch)) and len(batch) > 1:
+            # 件数不一致はプロンプトが長いときに起きやすい。1件ずつ問い直す
+            log(f"  kessai {key}: 応答形式不一致({len(batch)}件)。1件ずつ問い直す")
+            sub = [_judge_kessai_one(key, texts[i], model) for i in batch]
         if not isinstance(sub, list) or len(sub) != len(batch):
-            # 形式不一致は否決へ倒す: 置換・矛盾疑いの重要案件を未レビューで承認しない
-            # (index経路の「形式不一致は現行維持」、補正ループの「形式不一致は取り下げ」
-            # と同じ保守側。否決された候補は再起票されないので、決裁モデルの不調は
-            # 上申案件のまとめ廃案として書庫に見える)
-            sub = [{"action": "hiketsu", "memo": "応答形式不一致"} for _ in batch]
+            # 単件でも形式不一致: 承認も否決もせず「未決」で翌晩へ繰り越す
+            # (承認=未レビューの置換が通る / 否決=候補が二度と起票されない、の両方を避ける)
+            sub = [dict(MIKETSU) for _ in batch]
         for j, i in enumerate(batch):
-            res[i] = sub[j] if isinstance(sub[j], dict) \
-                else {"action": "hiketsu", "memo": "応答形式不一致"}
+            res[i] = sub[j] if isinstance(sub[j], dict) else dict(MIKETSU)
     return res
 
 
@@ -1146,6 +1170,146 @@ def _execute_fact_doc(key: str, run_id: int, idxs: list, cands: list, active: li
         f"{'部長決裁' if decision_action == 'kessai_ok' else '課長専決'} "
         f"insert={ins} dropped={drp}")
     return did, ins, drp
+
+
+def _file_miketsu_doc(key: str, run_id: int, idxs: list, active: list, dec: list,
+                      models: dict, journal: list, related=None):
+    """決裁が付かなかった案件の未決文書。pending_decision で止め、施行しない。
+
+    翌晩 process_miketsu() が payload から決裁をやり直す。候補本文と審査判定を
+    payload に持たせるので、turns を読み直さなくても再審理できる
+    (watermark は進むため、ここで廃案にすると候補は二度と起票されない)。
+    """
+    entries = [{"index": i, "content": active[i]["content"], "status": active[i]["status"],
+                "scope": active[i].get("scope"), "provenance": active[i].get("provenance") or [],
+                "confidence": active[i].get("confidence"),
+                "shinsa": {"action": dec[i].get("action"), "replaces": dec[i].get("replaces"),
+                           "escalate": bool(dec[i].get("escalate")),
+                           "memo": str(dec[i].get("memo") or "")[:300],
+                           "extends": [e for e in (dec[i].get("extends") or [])
+                                       if isinstance(e, int)]}}
+               for i in idxs]
+    items = [f"上申{len(idxs)}件について決裁が付かなかった(決裁者の応答が形式不一致)",
+             "承認も否決もせず未決とし、翌晩の便で再審理する",
+             "案件は別記第1のとおり"]
+    appendix = [("未決案件", [e["content"][:300] for e in entries])]
+    did, doc_no = file_draft("fact", key, ringi.build_title("fact", project=key),
+                             ringi.build_proposal("fact", items, appendix),
+                             {"candidates": entries, "miketsu": True}, run_id,
+                             related=related)
+    for actor, action, memo, payload in journal:
+        record_draft(did, actor, action, run_id, memo=memo, payload=payload)
+    advance_draft(did, "pending_review", "joshin")
+    record_draft(did, _actor("shinsa", models["shinsa"]), "joshin", run_id)
+    record_draft(did, _actor("kessai", models["kessai"]), "kurikoshi", run_id,
+                 memo="決裁不能につき未決繰越(1晩目)")
+    log(f"  ringi doc {doc_no} ({key}): 未決{len(idxs)}件を繰越(施行しない)")
+    return did
+
+
+def process_miketsu(run_id: int) -> set:
+    """未決文書(pending_decision)の再審理。run冒頭に process_remands から呼ぶ。
+
+    payload の候補と審査判定でもう一度決裁を行う。承認なら施行(facts登載)、
+    否決なら廃案、なお決裁が付かなければ繰越を1晩重ね、
+    ringi.max_miketsu_nights を超えたら廃案にする(無限繰越を作らない)。
+    返り値: factsが動いた project_key 群(このrunのENRICH対象に加える)。
+    """
+    settings = ringi.ringi_settings(BATCH_CONFIG)
+    models = {r: ringi.model_for(BATCH_CONFIG, r) for r in ("shinsa", "kessai")}
+    touched: set = set()
+    docs = psql_json(
+        "SELECT json_agg(json_build_object('id', id, 'doc_no', doc_no, "
+        "'project_key', project_key, 'payload', payload) ORDER BY id) "
+        "FROM drafts WHERE state='pending_decision' AND kind='fact' "
+        "AND payload->>'miketsu' = 'true';") or []
+    for row in docs:
+        did = int(row["id"])
+        try:
+            touched |= _miketsu_one(row, did, run_id, settings, models)
+        except Exception as exc:
+            log(f"  WARN 未決再審理 {row.get('doc_no')}: {type(exc).__name__}: {exc}")
+    return touched
+
+
+def _miketsu_one(row: dict, did: int, run_id: int, settings: dict, models: dict) -> set:
+    """未決文書1件の再審理。"""
+    key = row["project_key"]
+    doc_no = row["doc_no"]
+    payload = row["payload"] or {}
+    entries = payload.get("candidates") or []
+    nights = int(psql(f"SELECT count(*) FROM draft_log WHERE draft_id={did} "
+                      f"AND action='kurikoshi';") or 0)
+    cands = [{"content": e["content"], "status": e.get("status") or "verified",
+              "provenance": e.get("provenance") or [],
+              "confidence": e.get("confidence"), "scope": e.get("scope") or "project"}
+             for e in entries]
+    if not cands:
+        advance_draft(did, "pending_decision", "hiketsu")
+        record_draft(did, "system", "hiketsu", run_id, memo="未決文書に案件が無い")
+        return set()
+
+    # 照合対象は再取得する(繰越の間にfactsが動いている可能性がある)
+    allow = [{s["id"] for s in shortlist_facts(key, c["content"])} for c in cands]
+    dec = []
+    for e, al in zip(entries, allow):
+        sh = e.get("shinsa") or {}
+        rep = sh.get("replaces")
+        dec.append({"action": "insert", "replaces": rep if isinstance(rep, int) and rep in al
+                    else None, "escalate": sh.get("escalate"), "memo": sh.get("memo"),
+                    "extends": [x for x in (sh.get("extends") or []) if x in al]})
+    res = judge_kessai(key, list(zip(cands, dec)), models["kessai"])
+
+    ins = drp = 0
+    fact_ids = []
+    still = []
+    for i, (c, d, r) in enumerate(zip(cands, dec, res)):
+        act = r.get("action")
+        if act == "approve":
+            rep = r.get("replaces", d.get("replaces"))
+            d["replaces"] = rep if isinstance(rep, int) and rep in allow[i] else None
+            fid, _, _ = insert_fact(key, c, d, allow[i], run_id)
+            fact_ids.append(fid)
+            ins += 1
+        elif act in ("hiketsu", "sashimodoshi"):
+            drp += 1   # 再審理での差し戻しは廃案(繰越文書をさらに往復させない)
+        else:
+            still.append(i)
+
+    if still and nights < settings["max_miketsu_nights"]:
+        # 一部でも決裁が付かないなら文書は未決のまま。付いた分は施行済みなので
+        # payload を残余だけに書き換える(次の晩は残りだけを審理する)
+        rest = [entries[i] for i in still]
+        psql(f"UPDATE drafts SET payload = jsonb_set(payload, '{{candidates}}', "
+             f"{ringi.jsonb(rest)}) WHERE id={did};")
+        if fact_ids:
+            psql(ringi.link_facts_sql(did, fact_ids))
+        record_draft(did, _actor("kessai", models["kessai"]), "kurikoshi", run_id,
+                     memo=f"未決{len(still)}件を繰越({nights + 1}晩目)"
+                          + (f" / 施行{ins}件" if ins else ""))
+        log(f"  ringi doc {doc_no} ({key}): 未決{len(still)}件を繰越"
+            f"({nights + 1}晩目) 施行{ins}件")
+        return {key} if ins else set()
+
+    if still:
+        drp += len(still)   # 繰越上限: これ以上抱えない(書庫に廃案として残る)
+    if ins == 0:
+        advance_draft(did, "pending_decision", "hiketsu")
+        record_draft(did, _actor("kessai", models["kessai"]), "hiketsu", run_id,
+                     memo=f"再審理で登載なし(廃案{drp}件"
+                          + (f"、繰越上限{settings['max_miketsu_nights']}晩超過"
+                             if still else "") + ")")
+        log(f"  ringi doc {doc_no} ({key}): 再審理で否決 dropped={drp}")
+        return set()
+    advance_draft(did, "pending_decision", "kessai_ok")
+    record_draft(did, _actor("kessai", models["kessai"]), "kessai_ok", run_id,
+                 memo=f"再審理: 登載{ins}件 登載外{drp}件")
+    advance_draft(did, "approved", "shiko")
+    if fact_ids:
+        psql(ringi.link_facts_sql(did, fact_ids))
+    record_draft(did, "system", "shiko", run_id, memo=f"facts登載{ins}件 登載外{drp}件")
+    log(f"  ringi doc {doc_no} ({key}): 再審理で施行 insert={ins} dropped={drp}")
+    return {key}
 
 
 KESSAI_INDEX_PROMPT = """あなたはindex改定の決裁者(部長)です。プロジェクト {project} のindex
@@ -1622,6 +1786,7 @@ def process_remands(run_id: int) -> set:
     - kind='skill', state='approved', seen_state='seen': 後閲印済みskillの施行(git mv+push)
     - state='reexamine': 人間の差し戻し。決裁者が原文書+回議録+メモで再審理し、
       是正のsaishinri文書(related_doc=原文書)を起票・施行する
+    - state='pending_decision' の未決文書: 決裁が付かなかった案件の再審理(process_miketsu)
     件単位で失敗を握りつぶし(WARNログのみ)、本体パイプラインへ波及させない。
     返り値: 是正でfactsが動いたproject_key群(このrunのENRICH対象に加える)。
     """
@@ -1644,6 +1809,7 @@ def process_remands(run_id: int) -> set:
             touched |= _saishinri_one(r, run_id, m_kessai)
         except Exception as exc:
             log(f"  WARN saishinri {r.get('doc_no')}: {type(exc).__name__}: {exc}")
+    touched |= process_miketsu(run_id)
     return touched
 
 
@@ -1729,6 +1895,7 @@ def ringi_facts_project(project: str, candidates: list, run_id: int) -> tuple[in
         # --- 決裁(上申案件のみ。差し戻しはメモ付きで審査へ戻す)
         journal_j: list = []
         approved_j: list = []
+        miketsu_j: list = []    # 決裁が付かず翌晩へ繰り越す案件
         pending_k = list(joshin)
         k_round = 0
         while pending_k:
@@ -1753,10 +1920,11 @@ def ringi_facts_project(project: str, candidates: list, run_id: int) -> tuple[in
                         else (None if rep is None else dec[i].get("replaces"))
                     approved_j.append(i)
                 else:
-                    # 不明なaction(応答の破損)は否決へ倒す(未レビューの承認を作らない)
-                    dead[i] = "否決"
-                    journal_j.append((_actor("kessai", models["kessai"]), "hiketsu",
-                                      f"[{i}] 応答形式不一致(action={act!r})", None))
+                    # 決裁が付かない案件(応答の破損)は承認も否決もせず未決で繰り越す。
+                    # 承認すると未レビューの置換が通り、否決すると候補が二度と起票されない
+                    miketsu_j.append(i)
+                    journal_j.append((_actor("kessai", models["kessai"]), "kurikoshi",
+                                      f"[{i}] 決裁不能(action={act!r})につき未決繰越", None))
             if not sashi:
                 break
             # 差し戻し分を審査が再判定(決裁メモを申し送りに)
@@ -1797,8 +1965,12 @@ def ringi_facts_project(project: str, candidates: list, run_id: int) -> tuple[in
                 jrn, "kessai_ok", models, related=did_sen)
             inserted += i2
             dropped += d2
+        if miketsu_j:
+            _file_miketsu_doc(key, run_id, sorted(miketsu_j), active, dec, models,
+                              journal if not (did_sen or bucho_idxs) else [],
+                              related=did_sen)
         log(f"  ringi {key}: 候補{len(cands)} 軽易{len(keii)} 上申{len(joshin)} "
-            f"廃案{len(dead)}")
+            f"廃案{len(dead)} 未決{len(miketsu_j)}")
     return inserted, dropped
 
 
