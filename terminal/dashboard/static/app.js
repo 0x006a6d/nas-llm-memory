@@ -16,7 +16,7 @@ let factsCache = {};   // project -> rows
 const TABS = {
   overview: "文書事務概況",
   collect: "収受簿",
-  facts: "事実原簿",
+  facts: "現用文書",
   shelf: "書庫 (決裁済)",
   kanribo: "管理簿",
   skills: "スキル",
@@ -203,7 +203,7 @@ function renderOverview(el) {
         <div class="pn">${routedN} 宣言</div>
       </a>
     </div>
-    <div class="note info"><span class="tag">直し方</span><span>恒久的に直す → 「事実原簿」タブで facts を修正。繰り返し作業を固定化 → スキル/Hooks タブ。後で見返す会話 → 事実原簿タブでフラグ。index の直接編集は翌バッチで上書きされる一時措置です。</span></div>
+    <div class="note info"><span class="tag">直し方</span><span>恒久的に直す → 「現用文書」タブで facts を修正。繰り返し作業を固定化 → スキル/Hooks タブ。後で見返す会話 → 現用文書タブでフラグ。index の直接編集は翌バッチで上書きされる一時措置です。</span></div>
 
     <div class="numhd"><span class="no">01</span><span class="lb">毎セッション注入されるコンテキスト</span></div>
     <div class="budget-total">
@@ -336,7 +336,7 @@ function codexAgentsHtml() {
   const g = C.global;
   return `
     <h2 class="section">Codex 側配布(AGENTS.md 管理セクション / AGENTS.override.md)</h2>
-    <div class="note info"><span class="tag">仕組み</span><span>Codex には @include 構文が無いため、hooks/agents_sync.py(sender 実行時 = SessionStart+毎時)が記憶 index をファイルに直接展開して配布します。グローバルは ~/.codex/AGENTS.md のマーカー区切り管理セクション、プロジェクトは「手書き AGENTS.md 全文 + そのプロジェクトの index」を結合した AGENTS.override.md(git 追跡外)。ここは生成状態の確認のみで、編集は手書き AGENTS.md か「事実原簿」へ。プロジェクトの登録は <span class="mono">agents_sync.py register</span>(一覧: ${esc(C.registry_path)})。</span></div>
+    <div class="note info"><span class="tag">仕組み</span><span>Codex には @include 構文が無いため、hooks/agents_sync.py(sender 実行時 = SessionStart+毎時)が記憶 index をファイルに直接展開して配布します。グローバルは ~/.codex/AGENTS.md のマーカー区切り管理セクション、プロジェクトは「手書き AGENTS.md 全文 + そのプロジェクトの index」を結合した AGENTS.override.md(git 追跡外)。ここは生成状態の確認のみで、編集は手書き AGENTS.md か「現用文書」へ。プロジェクトの登録は <span class="mono">agents_sync.py register</span>(一覧: ${esc(C.registry_path)})。</span></div>
     <div class="card"><table>
       <tr><th>対象</th><th>手書き AGENTS.md</th><th>配布物</th></tr>
       <tr>
@@ -363,7 +363,7 @@ function renderContext(el) {
     })),
   ];
   el.innerHTML = `
-    <div class="note warn"><span class="tag">前提</span><span>index.md は夜間バッチ(03:00)が current_facts から全再生成します。ここでの直接編集は即座に反映されますが翌バッチで上書きされます。恒久的に直したい内容は「事実原簿」タブで facts を修正してください。</span></div>
+    <div class="note warn"><span class="tag">前提</span><span>index.md は夜間バッチ(03:00)が current_facts から全再生成します。ここでの直接編集は即座に反映されますが翌バッチで上書きされます。恒久的に直したい内容は「現用文書」タブで facts を修正してください。</span></div>
     <div class="note info"><span class="tag">凡例</span><span>一覧は claude-config/memory/ 配下の全端末・全プロジェクト分の実ファイルで、<b>全部が読み込まれるわけではありません</b>。1セッションに注入されるのは「CLAUDE.md + general」と、そのプロジェクトで開いたときのそのプロジェクトの index 1本だけ(routing 宣言に従う)。<span class="chip amber">auto</span> = 夜間バッチが再生成するファイル。<span class="devtag">端末名</span> = そのプロジェクトを主に使っている端末(会話履歴 turns からの推定)。</span></div>
     <div class="split" style="margin-top:14px">
       <div class="card filelist" id="ctxList"></div>
