@@ -908,6 +908,7 @@ def nas_snapshot():
             "where rn = 1 order by device, project_key"),
         "batch_config": nas_batch_config(),
         "shelf_pending": shelf_pending_count(),
+        "kanribo": kanribo_counts(),
         "shelf_miketsu": shelf_miketsu_count(),
         "fetched_at": datetime.now().strftime("%m-%d %H:%M:%S"),
     }
@@ -1129,6 +1130,83 @@ def shelf_op(op, draft_id, memo):
                    "returning draft_id;"):
         raise ConflictError("文書の状態が変わっています。再読込してください")
     return {"ok": True}
+
+
+# ------------------------------------------- 管理簿(行政文書ファイル管理簿。015)
+
+def kanribo_list(filt="all", category=""):
+    """管理簿の一覧。filt: all|genyou(現用)|manryou(満了)|sumi(廃棄済・移管済)。
+
+    公文書管理法7条の管理簿に当たる: 分類・名称・保存期間の満了する日・
+    満了時の措置・保存場所を並べる。閲覧のみ(操作は夜間バッチが行う)。
+    """
+    today = datetime.now().date().isoformat()
+    if DEMO:
+        # 判定は下のSQLと同じ条件にする(demoと本番で見え方を変えない)
+        rows = load_json(DEMO_DIR / "kanribo.json", {}).get("list", [])
+        if filt == "genyou":
+            rows = [r for r in rows if r.get("state") == "genyou"]
+        elif filt == "manryou":
+            rows = [r for r in rows if r.get("state") == "manryou"
+                    or (r.get("state") == "genyou" and (r.get("expires_on") or "9999") <= today)]
+        elif filt == "sumi":
+            rows = [r for r in rows if r.get("state") in ("haiki_zumi", "ikan_zumi")]
+        if category:
+            rows = [r for r in rows if r.get("category") == category]
+    else:
+        cond = "true"
+        if filt == "genyou":
+            cond = "state = 'genyou'"
+        elif filt == "manryou":
+            cond = "state = 'manryou' or (state = 'genyou' and expires_on <= current_date)"
+        elif filt == "sumi":
+            cond = "state in ('haiki_zumi','ikan_zumi')"
+        if category:
+            cond = f"({cond}) and category = {dollar_quote(category)}"
+        rows = sql_json(
+            "select f.id, f.category, r.measure as rule_measure, f.project_key, f.name, "
+            "f.period, f.fiscal_year, f.expires_on, f.measure, f.location, f.state, "
+            "f.n_rows, f.id_from, f.id_to, f.first_ts, f.last_ts, f.disposed_draft, "
+            "r.retention_days, r.retention_years, r.gate "
+            "from record_files f join retention_rules r on r.category = f.category "
+            f"where {cond} order by f.expires_on nulls last, f.category, f.project_key")
+    return [_stamp_retention(dict(r)) for r in rows]
+
+
+def _stamp_retention(row):
+    """保存期間と残り日数を表示用に整える(UIに計算を持たせない)。"""
+    days, years = row.get("retention_days") or 0, row.get("retention_years") or 0
+    row["retention_disp"] = (f"{years}年" if years else f"{days}日" if days else "常用")
+    exp = row.get("expires_on")
+    if exp:
+        left = (datetime.strptime(str(exp)[:10], "%Y-%m-%d").date() - datetime.now().date()).days
+        row["days_left"] = left
+    else:
+        row["days_left"] = None
+    return row
+
+
+def kanribo_rules():
+    """標準文書保存期間基準(規程)。管理簿タブの上部に出す。"""
+    if DEMO:
+        return load_json(DEMO_DIR / "kanribo.json", {}).get("rules", [])
+    return sql_json(
+        "select category, source_table, ts_column, retention_days, retention_years, "
+        "measure, gate, enabled, note from retention_rules order by category")
+
+
+def kanribo_counts():
+    """管理簿の要約(文書事務概況タブの注意欄用)。015未適用ならNone。"""
+    try:
+        out = run_sql(
+            "select count(*) filter (where state='genyou'), "
+            "count(*) filter (where state='genyou' and expires_on <= current_date), "
+            "count(*) filter (where state in ('haiki_zumi','ikan_zumi')) "
+            "from record_files;")
+        genyou, manryou, sumi = (int(x or 0) for x in (out or "0|0|0").split("|"))
+        return {"genyou": genyou, "manryou": manryou, "sumi": sumi}
+    except Exception:  # noqa: BLE001 — 015未適用環境
+        return None
 
 
 def shelf_pending_count():
@@ -1476,6 +1554,10 @@ class Handler(BaseHTTPRequestHandler):
                                           q.get("kind", [""])[0]))
             elif url.path == "/api/shelf_doc":
                 self.send_json(shelf_doc(q["id"][0]))
+            elif url.path == "/api/kanribo":
+                self.send_json({"list": kanribo_list(q.get("filter", ["all"])[0],
+                                                     q.get("category", [""])[0]),
+                                "rules": kanribo_rules()})
             elif url.path == "/api/usage":
                 self.send_json(usage_snapshot(q.get("hours", ["168"])[0]))
             else:

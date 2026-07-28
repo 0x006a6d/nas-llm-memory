@@ -18,6 +18,7 @@ const TABS = {
   collect: "収受簿",
   facts: "事実原簿",
   shelf: "書庫 (決裁済)",
+  kanribo: "管理簿",
   skills: "スキル",
   hooks: "Hooks",
   context: "例規 (常用文書)",
@@ -142,6 +143,8 @@ function warnings() {
     text: `未採用のスキル候補が ${sc.length} 件あります(スキルタブで確認。採用するときはセッションで「◯◯ を採用して」)。` });
   if (N.shelf_pending) out.push({ kind: "info", tag: "後閲待ち",
     text: `後閲待ちの決裁文書が ${N.shelf_pending} 件あります(書庫タブで後閲印または差し戻し)。` });
+  if (N.kanribo && N.kanribo.manryou) out.push({ kind: "warn", tag: "満了",
+    text: `保存期間が満了した行政文書ファイルが ${N.kanribo.manryou} 件あります(管理簿タブで確認。夜間バッチが廃棄伺い・移管として起票します)。` });
   if (N.shelf_miketsu) out.push({ kind: "info", tag: "未決",
     text: `決裁が付かず繰越中の文書が ${N.shelf_miketsu} 件あります(翌晩のバッチが再審理します。書庫タブの「未決(繰越中)」で内容を確認できます)。` });
   const B = S.builtin || {};
@@ -703,6 +706,70 @@ function renderFacts(el) {
   loadFacts();
   loadFlags();
   drawAutoMemory();
+}
+
+/* ---------------- 管理簿(行政文書ファイル管理簿。公文書管理法7条) ---------------- */
+
+const KANRIBO_STATE = { genyou: ["現用", ""], manryou: ["満了", "warn"],
+  haiki_zumi: ["廃棄済", "err"], ikan_zumi: ["移管済", "ok"] };
+const KANRIBO_MEASURE = { haiki: "廃棄", ikan: "移管", jouyou: "常用" };
+
+function renderKanribo(el) {
+  const filt = renderKanribo._filt || "genyou";
+  el.innerHTML = `
+    <div class="note info"><span class="tag">仕組み</span><span>収集した記録は<b>分類・名称・保存期間・満了する日・満了時の措置</b>を与えて「行政文書ファイル」(集合物)にまとめ、この管理簿に載ります(整理)。措置は満了より前に決めておきます(レコードスケジュール)。満了したファイルは<b>廃棄伺い</b>または<b>移管</b>として書庫に起票され、決裁を経て実行されます。ここは閲覧のみです。</span></div>
+    <h2 class="section">標準文書保存期間基準(規程)</h2>
+    <div class="card" id="kanriboRules">読み込み中…</div>
+    <h2 class="section">行政文書ファイル管理簿</h2>
+    <div class="toolrow" id="kanriboFilters">
+      ${[["genyou", "現用"], ["manryou", "満了・満了予定"], ["sumi", "廃棄済・移管済"], ["all", "全件"]].map(([v, l]) =>
+        `<button class="btn mini${filt === v ? "" : " ghost"}" data-f="${v}">${l}</button>`).join("")}
+    </div>
+    <div class="card" id="kanriboList">読み込み中…</div>`;
+
+  el.querySelectorAll("#kanriboFilters .btn").forEach((b) => {
+    b.onclick = () => { renderKanribo._filt = b.dataset.f; renderKanribo(el); };
+  });
+
+  (async () => {
+    const rulesEl = $("#kanriboRules", el);
+    const listEl = $("#kanriboList", el);
+    try {
+      const d = await j(`/api/kanribo?filter=${encodeURIComponent(filt)}`);
+      const rules = d.rules || [];
+      rulesEl.innerHTML = rules.length ? `<table>
+        <tr><th>大分類</th><th>実体</th><th>保存期間</th><th>満了時の措置</th><th>施行</th><th>適用</th><th>備考</th></tr>
+        ${rules.map((r) => `<tr>
+          <td class="mono">${esc(r.category)}</td>
+          <td class="mono faint">${esc(r.source_table)}</td>
+          <td>${r.retention_years ? `${r.retention_years}年` : r.retention_days ? `${r.retention_days}日` : "常用"}</td>
+          <td>${esc(KANRIBO_MEASURE[r.measure] || r.measure)}</td>
+          <td>${r.gate === "sokujiko" ? "決裁で施行" : "後閲印が条件"}</td>
+          <td>${r.enabled ? '<span class="chip ok">適用中</span>' : '<span class="chip">未適用</span>'}</td>
+          <td class="faint">${esc(r.note || "")}</td>
+        </tr>`).join("")}</table>` : '<span class="faint">規程がありません(015 未適用)。</span>';
+
+      const rows = d.list || [];
+      if (!rows.length) { listEl.innerHTML = '<span class="faint">該当するファイルはありません。</span>'; return; }
+      listEl.innerHTML = `<table>
+        <tr><th>名称(小分類)</th><th>大分類</th><th>project</th><th>期間</th><th>保存期間</th>
+            <th>満了する日</th><th>措置</th><th style="text-align:right">件数</th><th>保存場所</th><th>状態</th></tr>
+        ${rows.map((r) => `<tr>
+          <td>${esc(r.name)}</td>
+          <td class="mono faint">${esc(r.category)}</td>
+          <td class="mono faint">${esc(r.project_key)}</td>
+          <td class="mono">${esc(r.period)}</td>
+          <td>${esc(r.retention_disp || "")}</td>
+          <td class="mono">${r.expires_on ? esc(String(r.expires_on).slice(0, 10)) : "—"}
+            ${r.days_left !== null && r.days_left !== undefined
+              ? `<span class="faint">${r.days_left <= 0 ? "(満了)" : `(あと${r.days_left}日)`}</span>` : ""}</td>
+          <td>${esc(KANRIBO_MEASURE[r.measure] || r.measure)}</td>
+          <td style="text-align:right" class="mono">${num(r.n_rows)}</td>
+          <td class="mono faint">${esc(r.location)}</td>
+          <td>${chipOf(KANRIBO_STATE, r.state)}</td>
+        </tr>`).join("")}</table>`;
+    } catch (e) { listEl.textContent = `取得失敗: ${e.message}`; }
+  })();
 }
 
 /* ---------------- 書庫(起案・決裁文書) ---------------- */
@@ -1456,8 +1523,8 @@ function renderUsage(el) {
 /* ---------------- router ---------------- */
 
 const RENDER = { overview: renderOverview, context: renderContext, facts: renderFacts,
-  shelf: renderShelf, skills: renderSkills, hooks: renderHooks, routing: renderRouting,
-  messages: renderMessages, collect: renderCollect, usage: renderUsage };
+  shelf: renderShelf, kanribo: renderKanribo, skills: renderSkills, hooks: renderHooks,
+  routing: renderRouting, messages: renderMessages, collect: renderCollect, usage: renderUsage };
 
 function route() {
   const tab = (location.hash || "#overview").slice(1);

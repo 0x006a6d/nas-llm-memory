@@ -32,6 +32,7 @@ import sys
 import time
 from pathlib import Path
 
+import kanribo
 import ringi
 
 # 配置先(既定はNAS)。ローカル検証用に環境変数で差し替えられる
@@ -432,6 +433,46 @@ def pgroonga_ok() -> bool:
         if not _PGROONGA_OK:
             log("WARN: PGroonga(002)未適用のためORGANIZEはフラット照合で動作")
     return _PGROONGA_OK
+
+
+_KANRIBO_OK = None
+
+
+def kanribo_ok() -> bool:
+    """管理簿(015)が使えるか(run内で一度だけ判定)。未適用なら整理は行わない。"""
+    global _KANRIBO_OK
+    if _KANRIBO_OK is None:
+        _KANRIBO_OK = psql("SELECT (to_regclass('public.record_files') IS NOT NULL)::int;") == "1"
+        if not _KANRIBO_OK:
+            log("WARN: 管理簿(015)未適用のため整理(分類・保存期間の付与)は行わない")
+    return _KANRIBO_OK
+
+
+def seiri(run_id: int) -> int:
+    """整理(法5条): 収集した記録を集合物にまとめ、管理簿へ記載する。
+
+    有効な保存期間基準(retention_rules.enabled)の分類だけを対象にする。
+    件数とid範囲は毎晩の現況に合わせ、満了日と措置は初回記載時に確定する。
+    返り値: 記載した(更新含む)集合物の数。失敗は呼び出し側で握りつぶす。
+    """
+    if not kanribo_ok():
+        return 0
+    rules = psql_json(kanribo.rules_sql()) or []
+    total = 0
+    for rule in rules:
+        cat = rule["category"]
+        if cat not in kanribo.SOURCES:
+            log(f"  WARN 管理簿: 未知の分類 {cat} は整理しない")
+            continue
+        rows = psql_json(kanribo.scan_sql(cat, rule)) or []
+        for row in rows:
+            if row.get("id_from") is None:
+                continue
+            psql(kanribo.upsert_sql(cat, rule, row))
+            total += 1
+    if total:
+        log(f"  整理: {len(rules)}分類 {total}ファイルを管理簿に記載")
+    return total
 
 
 _EDGES_OK = None
@@ -2048,6 +2089,13 @@ def main(trial: bool = False):
 
         total_inserted = total_dropped = 0
         touched_keys = set()
+
+        # 整理(法5条): 分類・保存期間・満了日を与えて管理簿に載せる。
+        # 収集や蒸留とは独立なので、失敗しても本体パイプラインへ波及させない
+        try:
+            seiri(run_id)
+        except Exception as exc:
+            log(f"  WARN 整理: {type(exc).__name__}: {exc}")
 
         # 書庫の後閲キュー(後閲印済みskillの施行・差し戻しの再審理)と
         # skill登載伺い(scout候補の起票→審査→決裁。施行は後閲印待ちが既定)。
