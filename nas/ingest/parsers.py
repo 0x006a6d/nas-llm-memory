@@ -5,7 +5,9 @@ NAS外でもそのままテストできる。
 
 - parse_transcript      : Claude Code のセッションJSONL
 - parse_codex_rollout   : Codex CLI の rollout JSONL(role正規化・決定的ID)
+- parse_opencode        : opencode の SQLite を sender が JSONL 化したもの
 """
+import datetime
 import json
 
 from exclude import normalize_project_key
@@ -209,5 +211,125 @@ def parse_codex_rollout(payload: dict, payload_id: int) -> list[dict]:
             "payload_id": payload_id,
             "agent": "codex",
             "originator": originator,
+        })
+    return rows
+
+
+# ---------------------------------------------------------------- opencode
+
+def _epoch_ms_to_iso(ms) -> str | None:
+    """opencode のエポックミリ秒をISO8601(UTC)へ。数値でなければNone。"""
+    try:
+        sec = int(ms) / 1000
+    except (TypeError, ValueError):
+        return None
+    return datetime.datetime.fromtimestamp(sec, datetime.timezone.utc).isoformat()
+
+
+def _render_opencode_parts(parts) -> str:
+    """opencode の part 配列をテキストに落とす。
+
+    text=本文、tool=呼び出しと結果、subtask=サブエージェント起動。
+    reasoning(思考)は Claude Code の thinking と同じく保存しない。
+    step-start / step-finish は区切りなので落とす。
+    """
+    out: list[str] = []
+    for part in parts or []:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype == "text":
+            out.append(part.get("text", ""))
+        elif ptype == "tool":
+            state = part.get("state") or {}
+            name = part.get("tool", "?")
+            args = state.get("input")
+            if not isinstance(args, str):
+                args = json.dumps(args, ensure_ascii=False) if args is not None else ""
+            out.append(f"[tool_use:{name}] {args}")
+            result = state.get("output")
+            if result is not None:   # 0 や false も結果として残す
+                if not isinstance(result, str):
+                    result = json.dumps(result, ensure_ascii=False)
+                out.append(f"[tool_result] {result}")
+        elif ptype == "subtask":
+            out.append(f"[subtask:{part.get('agent') or part.get('command') or '?'}] "
+                       f"{part.get('description') or ''}")
+        # reasoning / step-start / step-finish は対象外
+    return "\n".join(p for p in out if p)
+
+
+def _opencode_model(message: dict, payload: dict) -> str | None:
+    """message から表示用のモデル名を組む(無ければセッションのモデル)。"""
+    model = message.get("model")
+    if isinstance(model, dict):
+        name = model.get("modelID") or model.get("id")
+        provider = model.get("providerID")
+    else:
+        name = message.get("modelID")
+        provider = message.get("providerID")
+    if not name:
+        ctx = payload.get("context_model")
+        if isinstance(ctx, str):
+            try:
+                ctx = json.loads(ctx)
+            except json.JSONDecodeError:
+                ctx = None
+        if isinstance(ctx, dict):
+            name = ctx.get("modelID") or ctx.get("id")
+            provider = provider or ctx.get("providerID")
+    if not name:
+        return None
+    return f"{provider}/{name}" if provider else name
+
+
+def parse_opencode(payload: dict, payload_id: int) -> list[dict]:
+    """opencode セッションをturns行のリストへ。
+
+    sender が SQLite の message とその part を束ねて 1行1メッセージの JSONL
+    ({id, time_created, message, parts})にしたものを受ける。
+
+    - role: message.role をそのまま使う(user/assistant のみ)
+    - message_uuid: opencode の message.id(DB全体で一意。再送しても同じ = 冪等)
+    - session_id: 'opencode:' プレフィックス + セッションID
+    - originator: エージェント種別(build/plan 等)。Codex の originator と同じ枠に入れる
+    """
+    device = payload.get("device", "unknown")
+    session_id = payload.get("session_id") or "unknown"
+    project_key = normalize_project_key(
+        payload.get("git_remote_url"), payload.get("project_dir"), device
+    )
+    rows: list[dict] = []
+    for line in (payload.get("transcript") or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # 壊れた行はスキップ(rawには残っている)
+        message = obj.get("message") or {}
+        uuid = obj.get("id")
+        role = message.get("role")
+        if not uuid or role not in ("user", "assistant"):
+            continue
+        content = _render_opencode_parts(obj.get("parts"))
+        if not content.strip():
+            continue
+        ts = obj.get("time_created") or (message.get("time") or {}).get("created")
+        rows.append({
+            "device": device,
+            "project_key": project_key,
+            "session_id": f"opencode:{session_id}",
+            "message_uuid": uuid,
+            "role": role,
+            "content": content,
+            "ts": _epoch_ms_to_iso(ts),
+            "cwd": (message.get("path") or {}).get("cwd") or payload.get("project_dir"),
+            "git_branch": payload.get("git_branch"),
+            "model": _opencode_model(message, payload),
+            "payload_id": payload_id,
+            "agent": "opencode",
+            "originator": message.get("agent") or payload.get("originator"),
         })
     return rows

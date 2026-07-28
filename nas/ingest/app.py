@@ -16,7 +16,7 @@ from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
 from exclude import is_excluded, load_entries, normalize_project_key
-from parsers import parse_codex_rollout, parse_transcript
+from parsers import parse_codex_rollout, parse_opencode, parse_transcript
 
 # ---------------------------------------------------------------- 設定
 
@@ -147,7 +147,7 @@ async def ingest(request: Request) -> dict:
     if kind not in ("transcript", "auto_memory"):
         raise HTTPException(status_code=400, detail=f"unknown kind: {kind}")
     agent = payload.get("agent", "claude-code")
-    if agent not in ("claude-code", "codex"):
+    if agent not in ("claude-code", "codex", "opencode"):
         raise HTTPException(status_code=400, detail=f"unknown agent: {agent}")
 
     # 収集除外(§8.3 第二防衛線)。200で応えて何も保存しない:
@@ -201,10 +201,18 @@ async def ingest(request: Request) -> dict:
     return result
 
 
+# agent別のtranscriptパーサ(未知のagentは受け口で弾くのでここには来ない)
+TRANSCRIPT_PARSERS = {
+    "claude-code": parse_transcript,
+    "codex": parse_codex_rollout,
+    "opencode": parse_opencode,
+}
+
+
 def _parse_and_insert(conn, kind: str, payload: dict, payload_id: int) -> dict:
     device = payload.get("device", "unknown")
     if kind == "transcript":
-        parse = parse_codex_rollout if payload.get("agent") == "codex" else parse_transcript
+        parse = TRANSCRIPT_PARSERS.get(payload.get("agent"), parse_transcript)
         rows = parse(payload, payload_id)
         inserted = 0
         for r in rows:
