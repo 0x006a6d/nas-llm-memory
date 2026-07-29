@@ -788,7 +788,7 @@ const seenChip = (d) => (["executed", "rejected", "approved"].includes(d.state)
   ? chipOf(SHELF_SEEN, d.seen_state) : '<span class="faint">—</span>');
 const SHELF_ACTION = { kian: "起案", hosei: "補正", shinsa_ok: "審査済(専決)", joshin: "上申",
   sashimodoshi: "差し戻し", kessai_ok: "決裁", hiketsu: "否決", shiko: "施行",
-  kouetsu: "後閲", saishinri: "再審理", skill_mv: "git移動" };
+  kouetsu: "後閲", saishinri: "再審理", kurikoshi: "未決繰越", skill_mv: "git移動" };
 // 文書番号の表示形式はサーバが付ける(表記規則の正は ringi.display_doc_no。
 // 令和元年度の扱いをここに重複させない)
 const docNoDisp = (r) => r.doc_no_disp || r.doc_no;
@@ -797,11 +797,59 @@ const chipOf = (map, key) => {
   return `<span class="chip ${cls}">${esc(label)}</span>`;
 };
 
+/* 停留所(路線図・行程図・便リプレイで共用)。序列は 起案<審査<決裁<施行<後閲 で、
+   小さい方へ動く回議(差し戻し・再審理)を逆行として描く。 */
+const STATIONS = [["kian", "起案"], ["shinsa", "審査"], ["kessai", "決裁"],
+  ["shiko", "施行"], ["kouetsu", "後閲"]];
+const stationIdx = (key) => STATIONS.findIndex(([k]) => k === key);
+const stationLabel = (key) => (STATIONS.find(([k]) => k === key) || [key, key])[1];
+
+/* 回議録1行がどの停留所での処理かを決める。actor 接頭辞(kian:/shinsa:/kessai:/human)が
+   第一キーで、actor が system(モデルを介さない記帳)のときだけ action で振り分ける。 */
+function stationOf(e) {
+  const actor = String((e && e.actor) || "");
+  const pre = actor.split(":")[0];
+  if (["kian", "shinsa", "kessai"].includes(pre)) return pre;
+  if (actor === "human") return "kouetsu";
+  const a = (e && e.action) || "";
+  if (["shiko", "skill_mv"].includes(a)) return "shiko";
+  if (["shinsa_ok", "joshin"].includes(a)) return "shinsa";
+  if (["kessai_ok", "hiketsu", "kurikoshi", "saishinri"].includes(a)) return "kessai";
+  return "kian";   // kian/hosei と未知の処理は起案席に置く
+}
+
+/* 文書ごとの行程図(決裁欄4マスの補足)。回議録を停留所の並びとして横に描き、
+   上流へ戻る回議は逆行コネクタにする。往復の回数と、どこで滞ったかを1行で見る。 */
+function routeStrip(log) {
+  if (!log.length) return "";
+  const cls = (a) => (["sashimodoshi", "hiketsu"].includes(a) ? " err"
+    : a === "kurikoshi" ? " warn" : "");
+  return `<div class="rt-strip">${log.map((e, i) => {
+    const st = stationOf(e);
+    const who = e.actor && e.actor.includes(":") ? e.actor.split(":")[1] : (e.actor || "");
+    const stamp = `<span class="rt-stamp${cls(e.action)}"${e.memo ? ` title="${esc(e.memo)}"` : ""}>
+        <span class="rt-act">${esc(SHELF_ACTION[e.action] || e.action)}</span>
+        <span class="rt-stn">${esc(stationLabel(st))}</span>
+        <span class="rt-who mono">${esc(who)}</span>
+        <span class="rt-when">${esc(String(e.created_at || "").slice(5, 10))}</span>
+      </span>`;
+    const nx = log[i + 1];
+    if (!nx) return stamp;
+    const back = stationIdx(stationOf(nx)) < stationIdx(st);
+    return `${stamp}<span class="rt-link${back ? " back" : ""}">${back ? "↩" : "→"}</span>`;
+  }).join("")}</div>`;
+}
+
 function renderShelf(el) {
+  // 便リプレイのタイマーは再描画・タブ切替で必ず止める(描画済みDOMは捨てられるため)
+  clearTimeout(drawReplay._timer);
   const filt = renderShelf._filt || "pending";
   const kind = renderShelf._kind || "";
+  const state = renderShelf._state || "";
   el.innerHTML = `
     <div class="note info"><span class="tag">仕組み</span><span>夜間バッチの判断(facts登載・index改定・skill登載)は起案文書として起票され、審査(課長専決)・決裁(部長)を経て施行されます。人間はここで<b>後閲</b>します: 妥当なら後閲印、問題があれば<b>メモを付けて差し戻し</b> — 翌晩の便で決裁者が再審理し、是正文書を起票します。skillの施行(全端末配布)だけは後閲印が条件です。決裁が付かなかった案件は<b>未決</b>として繰り越され(承認も廃案もしない)、翌晩に再審理されます。</span></div>
+    <div class="card" id="stnMap" style="margin-top:14px">読み込み中…</div>
+    <div class="card" id="replayCard" style="margin-top:14px"></div>
     <h2 class="section">専決規程(モデルの役割分担) — NAS batch/config.json</h2>
     <div class="card" id="kiteiCard"></div>
     <div class="toolrow" style="margin-top:14px" id="shelfFilters">
@@ -816,9 +864,12 @@ function renderShelf(el) {
     <div class="card" id="shelfList">読み込み中…</div>
     <div id="shelfDoc"></div>`;
 
+  drawStationMap(el);
+  drawReplay($("#replayCard", el));
   drawKitei($("#kiteiCard", el));
+  // フィルタボタンは見方そのものの切替なので、停留所クリックで付いた state 絞り込みは外す
   el.querySelectorAll("#shelfFilters .btn").forEach((b) => {
-    b.onclick = () => { renderShelf._filt = b.dataset.f; renderShelf(el); };
+    b.onclick = () => { renderShelf._filt = b.dataset.f; renderShelf._state = ""; renderShelf(el); };
   });
   $("#shelfKind", el).onchange = (e) => { renderShelf._kind = e.target.value; renderShelf(el); };
 
@@ -827,7 +878,7 @@ function renderShelf(el) {
 
   async function loadList() {
     try {
-      const rows = await j(`/api/shelf?filter=${filt}${kind ? `&kind=${kind}` : ""}`);
+      const rows = await j(`/api/shelf?filter=${filt}${kind ? `&kind=${kind}` : ""}${state ? `&state=${state}` : ""}`);
       if (!rows.length) {
         listEl.innerHTML = '<span class="faint">該当する文書はありません。</span>';
         return;
@@ -893,6 +944,7 @@ function renderShelf(el) {
             <div class="kv">${s ? `${esc(s.what)}<br><span class="mono faint">${esc(s.who)}</span><br><span class="faint">${esc(s.when)}</span>` : "—"}</div>
           </div>`).join("")}
         </div>
+        ${routeStrip(log)}
         <code class="block" style="white-space:pre-wrap">${esc(d.proposal || "")}</code>
         ${(d.facts || []).length ? `<h2 class="section">登載facts</h2><table>
           <tr><th>id</th><th>内容</th><th>状態</th></tr>
@@ -951,6 +1003,234 @@ function renderShelf(el) {
   }
 
   loadList();
+}
+
+/* A1 停留所マップ。書庫タブ冒頭の路線図。上段は起案から後閲までの本線、下段は差し戻し・
+   再審理の戻り線。各停留所に担当モデル(専決規程の roles)と滞留件数を出し、クリックで
+   下の一覧を絞り込む。件数は /api/shelf_counts。0件のときはバッジを出さず枠だけ残す。 */
+async function drawStationMap(el) {
+  const card = $("#stnMap", el);
+  if (!card) return;
+  const filt = renderShelf._filt || "pending";
+  const state = renderShelf._state || "";
+  const roles = (N.batch_config || {}).roles || {};
+  let c;
+  try { c = await j("/api/shelf_counts"); }
+  catch (e) {
+    card.innerHTML = `<div class="note warn"><span class="tag">件数未取得</span><span>停留所ごとの件数を取れません: ${esc(e.message)}</span></div>`;
+    return;
+  }
+  if (!c) {   // 012未適用(drafts無し)の環境ではサーバがnullを返す
+    card.innerHTML = '<div class="note warn"><span class="tag">未適用</span><span>起案・決裁のスキーマ(012)が未適用のため、停留所マップを出せません。</span></div>';
+    return;
+  }
+
+  // 起案席に滞留する状態は「補正中」で、これは下段の戻り線に出すため上段は件数を持たない
+  const stns = [
+    { name: "起案", model: roles.kian || "", n: 0 },
+    { name: "審査", model: roles.shinsa || "", n: c.pending_review, filt: "all", state: "pending_review" },
+    { name: "決裁", model: roles.kessai || "", n: c.pending_decision, filt: "all", state: "pending_decision",
+      extra: N.shelf_miketsu ? { label: `未決 ${num(N.shelf_miketsu)}`, cls: "warn", filt: "miketsu", state: "" } : null },
+    { name: "決裁済", model: "", n: c.approved, filt: "all", state: "approved" },
+    { name: "施行", model: "system", n: c.executed, filt: "all", state: "executed" },
+    { name: "後閲", model: "human", n: c.kouetsu_pending, cls: "warn", filt: "pending", state: "" },
+  ];
+  const stnHtml = (s) => {
+    const on = s.filt && s.filt === filt && (s.state || "") === state;
+    return `<div class="stn${s.filt ? " click" : ""}${on ? " sel" : ""}"${s.filt ? ` data-filt="${s.filt}" data-state="${esc(s.state || "")}"` : ""}>
+      <div class="stn-name">${esc(s.name)}</div>
+      <div class="stn-model mono faint">${esc(s.model || "—")}</div>
+      <div class="stn-n">
+        ${s.n ? `<span class="chip ${s.cls || "blue"}">${num(s.n)}</span>` : ""}
+        ${s.extra ? `<span class="chip ${s.extra.cls} click" data-filt="${s.extra.filt}" data-state="">${esc(s.extra.label)}</span>` : ""}
+      </div>
+    </div>`;
+  };
+  // 審査と決裁の間は分岐(課長専決はここで決裁済へ抜け、上申された案件だけ決裁へ進む)
+  const branch = `<div class="stn-branch"><span>専決 → 決裁済</span><span>上申 → 決裁</span></div>`;
+  const line = stns.map((s, i) => stnHtml(s) +
+    (i === stns.length - 1 ? "" : i === 1 ? branch : '<span class="stn-arrow"></span>')).join("");
+
+  const backs = [
+    { st: "remanded_to_drafter", to: "起案へ", n: c.remanded_to_drafter, filt: "all", state: "remanded_to_drafter" },
+    { st: "remanded_to_reviewer", to: "審査へ", n: c.remanded_to_reviewer, filt: "all", state: "remanded_to_reviewer" },
+    { st: "reexamine", to: "決裁へ(翌晩再審理)", n: c.reexamine, filt: "remanded", state: "" },
+  ].filter((b) => b.n);
+  const backHtml = `<div class="stn-back">
+    <span class="stn-back-arrow"></span>
+    <span class="faint">戻り線</span>
+    ${backs.length ? backs.map((b) => `<span class="chip warn click" data-filt="${b.filt}" data-state="${esc(b.state)}">${esc(SHELF_STATE[b.st][0])} ${b.to} · ${num(b.n)}</span>`).join("")
+      : '<span class="faint">戻っている文書はありません。</span>'}
+  </div>`;
+
+  card.innerHTML = `<div class="stn-map">
+    <div class="stn-line">${line}</div>
+    ${backHtml}
+  </div>`;
+  card.querySelectorAll("[data-filt]").forEach((n2) => {
+    n2.onclick = (ev) => {
+      ev.stopPropagation();
+      renderShelf._filt = n2.dataset.filt;
+      renderShelf._state = n2.dataset.state || "";
+      renderShelf(el);
+    };
+  });
+}
+
+/* A3 夜間便リプレイ。draft_log を created_by='run-N' で束ねた1便を、文書が席から席へ
+   動くアニメーションとして再生する。初期表示は便セレクタと再生ボタンだけで、
+   再生(または1ステップ送り)を押すまで舞台には席しか置かない。 */
+function drawReplay(card) {
+  if (!card) return;
+  const SEATS = [["kian", "起案席"], ["shinsa", "審査席"], ["kessai", "決裁席"], ["shiko", "施行・書庫"]];
+  // 後閲(human)は便の記帳には出てこないが、来た場合は書庫側の席に置く
+  const seatIdx = (key) => { const i = SEATS.findIndex(([k]) => k === key); return i < 0 ? SEATS.length - 1 : i; };
+  const seatsHtml = () => SEATS.map(([, label], i) =>
+    `<div class="rp-seat" style="left:${i * (100 / SEATS.length)}%;width:${100 / SEATS.length}%">${esc(label)}</div>`).join("")
+    + '<div class="rp-trash">廃案置き場</div>';
+
+  card.innerHTML = `
+    <div class="toolrow">
+      <b>夜間便リプレイ</b>
+      <select id="rpRun"></select>
+      <button class="btn mini" id="rpPlay">▶ 再生</button>
+      <button class="btn mini ghost" id="rpPrev">⏮ 前</button>
+      <button class="btn mini ghost" id="rpNext">次 ⏭</button>
+      <button class="btn mini ghost" id="rpSpeed">1x</button>
+      <span class="faint mono" id="rpStep">step 0/0</span>
+    </div>
+    <div class="replay-stage" id="rpStage">${seatsHtml()}</div>
+    <div class="replay-caption" id="rpCap"><span class="faint">便を選んで ▶ を押すと、その晩の回議をなぞります。</span></div>`;
+
+  const stage = $("#rpStage", card);
+  const cap = $("#rpCap", card);
+  const stepEl = $("#rpStep", card);
+  const runSel = $("#rpRun", card);
+  const playBtn = $("#rpPlay", card);
+  const speedBtn = $("#rpSpeed", card);
+  let evs = [];            // この便の記帳(log順)
+  let docs = new Map();    // draft_id -> {el, lane}
+  let k = 0;               // 適用済みステップ数(0 = 便の開始前)
+  let built = false;
+  let playing = false;
+  let speed = 1;
+
+  function stop() {
+    playing = false;
+    clearTimeout(drawReplay._timer);
+    playBtn.textContent = "▶ 再生";
+  }
+
+  // 便に出てくる文書を1件1レーンに割り当て、舞台に並べる
+  function build() {
+    docs = new Map();
+    stage.innerHTML = seatsHtml();
+    for (const e of evs) {
+      if (docs.has(e.draft_id)) continue;
+      const d = document.createElement("div");
+      d.className = "replay-doc";
+      d.innerHTML = `<span class="rp-no mono">${esc(e.doc_no_disp || e.doc_no || "")}</span>
+        <span class="rp-title">${esc(e.title || "")}</span>
+        <span class="rp-stamps"></span>`;
+      // 初期位置は起案席。付けてから transform を書くと入場が滑って見えるので生成時に置く
+      d.style.transform = `translate(8px, ${34 + docs.size * 52}px)`;
+      stage.appendChild(d);
+      docs.set(e.draft_id, { el: d, lane: docs.size });
+    }
+    stage.style.height = `${34 + Math.max(1, docs.size) * 52 + 56}px`;
+    built = true;
+  }
+
+  function ensureBuilt() { if (!built) { build(); render(k); } }
+
+  /* 舞台の状態は「先頭から i 件を適用した結果」として毎回組み直す(前ステップへも戻せる)。
+     位置だけ transform で書き換わるので、動いた文書だけが CSS transition で滑る。 */
+  function render(i) {
+    const w = stage.clientWidth / SEATS.length;
+    const cur = i > 0 ? evs[i - 1] : null;   // 直前に適用した記帳
+    let dead = 0;
+    for (const [id, d] of docs) {
+      const past = evs.slice(0, i).filter((e) => e.draft_id === id);
+      const last = past[past.length - 1];
+      const done = past.some((e) => e.action === "hiketsu");
+      let si = last ? seatIdx(stationOf(last)) : 0;
+      // 差し戻しは1つ上流の席へ戻す(次の処理までそこに居る)
+      if (last && last.action === "sashimodoshi") si = Math.max(0, si - 1);
+      const x = done ? 8 + (dead % SEATS.length) * w : 8 + si * w;
+      const y = done ? 34 + docs.size * 52 + 6 : 34 + d.lane * 52;
+      if (done) dead += 1;
+      d.el.style.width = `${Math.max(90, w - 16)}px`;
+      d.el.style.transform = `translate(${x}px, ${y}px)`;
+      d.el.classList.toggle("waiting", !last);
+      d.el.classList.toggle("dead", done);
+      d.el.classList.toggle("miketsu", past.some((e) => e.action === "kurikoshi"));
+      // 直前に適用した記帳が差し戻しなら、その文書を warn 色で明滅させる
+      d.el.classList.toggle("flash", !!cur && cur.draft_id === id && cur.action === "sashimodoshi");
+      $(".rp-stamps", d.el).innerHTML = past.map((e) => {
+        const cls = ["sashimodoshi", "hiketsu"].includes(e.action) ? " err"
+          : e.action === "kurikoshi" ? " warn" : "";
+        const pop = cur && cur.id === e.id ? " pop" : "";
+        return `<span class="rt-stamp mini${cls}${pop}"${e.memo ? ` title="${esc(e.memo)}"` : ""}>${esc(SHELF_ACTION[e.action] || e.action)}</span>`;
+      }).join("");
+    }
+    cap.innerHTML = cur
+      ? `<span class="mono">${esc(cur.doc_no_disp || cur.doc_no || "")}</span>
+         <span class="chip">${esc(stationLabel(stationOf(cur)))}</span>
+         <b>${esc(SHELF_ACTION[cur.action] || cur.action)}</b>
+         <span class="mono faint">${esc(cur.actor || "")}</span>
+         <span>${esc(cur.memo || "")}</span>`
+      : '<span class="faint">便の開始前です。</span>';
+    stepEl.textContent = `step ${i}/${evs.length}`;
+  }
+
+  function setStep(i) { ensureBuilt(); k = Math.max(0, Math.min(evs.length, i)); render(k); }
+
+  function tick() {
+    // タブを切り替えて舞台ごと捨てられていたら、そこで打ち切る
+    if (!stage.isConnected) { stop(); return; }
+    if (k >= evs.length) { stop(); return; }
+    setStep(k + 1);
+    if (k >= evs.length) { stop(); return; }
+    drawReplay._timer = setTimeout(tick, 900 / speed);
+  }
+
+  async function load(run) {
+    stop();
+    try {
+      const d = await j(`/api/shelf_replay${run ? `?run=${encodeURIComponent(run)}` : ""}`);
+      const runs = d.runs || [];
+      runSel.innerHTML = runs.length ? runs.map((r) => `<option value="${esc(r.run_id)}"${String(r.run_id) === String(d.run_id) ? " selected" : ""}>run-${esc(r.run_id)}(${esc(String(r.t0 || "").slice(5, 16).replace("T", " "))}・${num(r.n)}件)</option>`).join("")
+        : '<option value="">(便の記録がありません)</option>';
+      evs = d.events || [];
+      built = false;
+      k = 0;
+      docs = new Map();
+      stage.style.height = "";
+      stage.innerHTML = seatsHtml();
+      stepEl.textContent = `step 0/${evs.length}`;
+      cap.innerHTML = evs.length
+        ? '<span class="faint">▶ を押すと、この便の回議を順に再生します。</span>'
+        : '<span class="faint">この便には記帳がありません。</span>';
+    } catch (e) {
+      cap.innerHTML = `<div class="note warn"><span class="tag">失敗</span><span>${esc(e.message)}</span></div>`;
+    }
+  }
+
+  playBtn.onclick = () => {
+    if (playing) { stop(); return; }
+    if (!evs.length) return;
+    if (k >= evs.length) setStep(0);
+    ensureBuilt();
+    playing = true;
+    playBtn.textContent = "⏸ 一時停止";
+    drawReplay._timer = setTimeout(tick, 250);
+  };
+  $("#rpPrev", card).onclick = () => { stop(); setStep(k - 1); };
+  $("#rpNext", card).onclick = () => { stop(); setStep(k + 1); };
+  speedBtn.onclick = () => { speed = speed === 1 ? 2 : 1; speedBtn.textContent = `${speed}x`; };
+  runSel.onchange = () => load(runSel.value);
+
+  load("");
 }
 
 function drawKitei(card) {

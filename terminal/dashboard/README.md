@@ -77,5 +77,7 @@ NAS への問い合わせは `ssh nas`(~/.ssh/config)経由。NAS 系データ�
 - ファイル保存(index.md / sync-exclude.txt)は書き込み前に同名 `.bak` へ退避する。
 - 編集できるファイルは server.py の `resolve_save_target()` のホワイトリストのみ。
 - 会話フラグは NAS の `flags` テーブル(session_id 主キー)に保存し、turns 本体は変更しない。
-  テーブルは `create table if not exists` で作成済み。夜間バッチへの重み付け連携は未実装
+  DDL は `nas/ingest/schema/016_flags.sql`。会話中からは ingest の `POST /flag`
+  (nas-memory-flag スキル)でも付けられ、出所は created_by の接頭辞
+  (`dashboard-` / `session-<device>-`)で区別する。夜間バッチへの重み付け連携は未実装
   (次段階。バッチは NAS 側リポジトリのため)。

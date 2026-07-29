@@ -1024,8 +1024,19 @@ def _stamp_doc_no(row):
     return row
 
 
-def shelf_list(filt, kind):
-    """drafts一覧。filt: pending(後閲待ち)|remanded(差し戻し中)|miketsu(未決)|all。"""
+# drafts の状態(遷移定義の正は nas/batch/ringi.py の TRANSITIONS)
+SHELF_STATES = ("pending_review", "remanded_to_drafter", "pending_decision",
+                "remanded_to_reviewer", "approved", "executed", "rejected",
+                "reexamine")
+
+
+def shelf_list(filt, kind, state=None):
+    """drafts一覧。filt: pending(後閲待ち)|remanded(差し戻し中)|miketsu(未決)|all。
+
+    state は SHELF_STATES のいずれかで、filt に重ねて絞り込む。
+    """
+    if state and state not in SHELF_STATES:
+        raise ValueError(f"unknown state: {state}")
     if DEMO:
         data = load_json(DEMO_DIR / "shelf.json", {})
         rows = data.get("list", [])
@@ -1040,6 +1051,8 @@ def shelf_list(filt, kind):
             rows = [r for r in rows if r.get("state") == "pending_decision"]
         if kind:
             rows = [r for r in rows if r.get("kind") == kind]
+        if state:
+            rows = [r for r in rows if r.get("state") == state]
         return [_stamp_doc_no(dict(r)) for r in rows]
     cond = "true"
     if filt == "pending":
@@ -1052,6 +1065,8 @@ def shelf_list(filt, kind):
         cond = "state = 'pending_decision'"
     if kind:
         cond = f"({cond}) and kind = {dollar_quote(kind)}"
+    if state:
+        cond = f"({cond}) and state = {dollar_quote(state)}"
     return [_stamp_doc_no(r) for r in sql_json(
         "select id, doc_no, fiscal_year, seq, kind, project_key, title, state, "
         "decision_class, seen_state, created_at, decided_at, executed_at, related_doc "
@@ -1086,6 +1101,59 @@ def shelf_doc(did):
         + (f" or id = {int(rel)}" if rel else "") + " "
         "order by id")
     return doc
+
+
+def shelf_replay(run=None):
+    """夜間便(draft_log.created_by='run-N')の記帳を便単位で並べる。
+
+    便番号列は無く created_by が便の識別子(人間操作は dashboard-YYYYMMDD)。
+    run 省略時は最新便。便が1つも無ければ run_id/events は空。
+    """
+    if run is not None and run != "":
+        if not re.fullmatch(r"[0-9]+", str(run)) or int(run) <= 0:
+            raise ValueError(f"unknown run: {run}")
+        run = int(run)
+    else:
+        run = None
+    if DEMO:
+        docs = (load_json(DEMO_DIR / "shelf.json", {}).get("docs") or {})
+        runs, events = {}, {}
+        for doc in docs.values():
+            for e in doc.get("log") or []:
+                m = re.fullmatch(r"run-([0-9]+)", str(e.get("created_by") or ""))
+                if not m:
+                    continue
+                rid, ts = int(m.group(1)), e.get("created_at")
+                r = runs.setdefault(rid, {"run_id": rid, "n": 0, "t0": ts, "t1": ts})
+                r["n"] += 1
+                r["t0"], r["t1"] = min(r["t0"], ts), max(r["t1"], ts)
+                events.setdefault(rid, []).append(_stamp_doc_no({
+                    "id": e.get("id"), "draft_id": doc.get("id"),
+                    "actor": e.get("actor"), "action": e.get("action"),
+                    "memo": e.get("memo"), "created_at": ts,
+                    "doc_no": doc.get("doc_no"), "fiscal_year": doc.get("fiscal_year"),
+                    "seq": doc.get("seq"), "kind": doc.get("kind"),
+                    "title": doc.get("title"), "project_key": doc.get("project_key")}))
+        rows = sorted(runs.values(), key=lambda r: r["run_id"], reverse=True)[:10]
+        if not rows:
+            return {"runs": [], "run_id": None, "events": []}
+        rid = run if run is not None else rows[0]["run_id"]
+        return {"runs": rows, "run_id": rid,
+                "events": sorted(events.get(rid, []), key=lambda e: e["id"])}
+    rows = sql_json(
+        "select substring(created_by from 5)::bigint run_id, count(*) n, "
+        "min(created_at) t0, max(created_at) t1 from draft_log "
+        "where created_by ~ '^run-[0-9]+$' group by 1 order by 1 desc limit 10")
+    if not rows:
+        return {"runs": [], "run_id": None, "events": []}
+    rid = run if run is not None else int(rows[0]["run_id"])
+    events = sql_json(
+        "select l.id, l.draft_id, l.actor, l.action, l.memo, l.created_at, "
+        "d.doc_no, d.fiscal_year, d.seq, d.kind, d.title, d.project_key "
+        "from draft_log l join drafts d on d.id = l.draft_id "
+        f"where l.created_by = {dollar_quote(f'run-{rid}')} order by l.id")
+    return {"runs": rows, "run_id": rid,
+            "events": [_stamp_doc_no(e) for e in events]}
 
 
 def shelf_op(op, draft_id, memo):
@@ -1216,6 +1284,33 @@ def shelf_pending_count():
         out = run_sql("select count(*) from drafts where seen_state='pending' "
                       "and state in ('executed','rejected','approved');")
         return int(out or 0)
+    except Exception:  # noqa: BLE001 — drafts未適用環境
+        return None
+
+
+def shelf_counts():
+    """書庫の状態別文書数(停留所マップ用)。012未適用ならNone。"""
+    keys = SHELF_STATES + ("kouetsu_pending", "total")
+    if DEMO:
+        rows = load_json(DEMO_DIR / "shelf.json", {}).get("list", [])
+        out = {s: sum(1 for r in rows if r.get("state") == s) for s in SHELF_STATES}
+        # 後閲待ちの条件は shelf_pending_count() と同じにする
+        out["kouetsu_pending"] = sum(
+            1 for r in rows if r.get("seen_state") == "pending"
+            and r.get("state") in ("executed", "rejected", "approved"))
+        out["total"] = len(rows)
+        return out
+    try:
+        out = run_sql(
+            "select "
+            + "".join(f"count(*) filter (where state='{s}'), " for s in SHELF_STATES)
+            + "count(*) filter (where seen_state='pending' "
+              "  and state in ('executed','rejected','approved')), "
+              "count(*) from drafts;")
+        vals = (out or "").split("|")
+        if len(vals) != len(keys):
+            raise ValueError(f"unexpected count row: {out!r}")
+        return dict(zip(keys, (int(x or 0) for x in vals)))
     except Exception:  # noqa: BLE001 — drafts未適用環境
         return None
 
@@ -1552,7 +1647,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(list_messages())
             elif url.path == "/api/shelf":
                 self.send_json(shelf_list(q.get("filter", ["pending"])[0],
-                                          q.get("kind", [""])[0]))
+                                          q.get("kind", [""])[0],
+                                          q.get("state", [""])[0]))
+            elif url.path == "/api/shelf_counts":
+                self.send_json(shelf_counts())
+            elif url.path == "/api/shelf_replay":
+                self.send_json(shelf_replay(q.get("run", [""])[0]))
             elif url.path == "/api/shelf_doc":
                 self.send_json(shelf_doc(q["id"][0]))
             elif url.path == "/api/kanribo":
@@ -1563,6 +1663,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(usage_snapshot(q.get("hours", ["168"])[0]))
             else:
                 self.send_error(404)
+        except ValueError as e:  # クエリ値が規定外(不正なstate/run など)
+            self.send_json({"error": str(e)}, 400)
         except Exception as e:  # noqa: BLE001 — API 応答としてエラーを返す
             self.send_json({"error": str(e)}, 500)
 

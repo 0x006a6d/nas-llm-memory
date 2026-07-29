@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -286,6 +287,55 @@ async def message(request: Request) -> dict:
             ),
         ).fetchone()
     return {"id": row[0]}
+
+
+# ---------------------------------------------------------------- 会話フラグ(flags)
+
+FLAG_NOTE_MAX = 1000
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,120}")
+
+
+@app.post("/flag", dependencies=[Depends(require_token)])
+async def flag(request: Request) -> dict:
+    """重要な会話のフラグ付与/解除。session_id 単位(turns 本体は変更しない)。"""
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid json")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    op = payload.get("op") or "add"
+    if op not in ("add", "remove"):
+        raise HTTPException(status_code=400, detail="unknown op")
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+        raise HTTPException(status_code=400, detail="invalid session_id")
+    note = payload.get("note")
+    if note is None:
+        note = ""
+    if not isinstance(note, str):
+        raise HTTPException(status_code=400, detail="note must be a string")
+    # 切り詰めではなく拒否(/message と同じ理由)
+    if len(note) > FLAG_NOTE_MAX:
+        raise HTTPException(status_code=400, detail="note too long")
+    # dashboard の 'dashboard-YYYYMMDD' と接頭辞で出所を区別する
+    device = re.sub(r"[^A-Za-z0-9._-]", "", str(payload.get("device") or ""))[:60] or "unknown"
+    created_by = f"session-{device}-{datetime.now().strftime('%Y%m%d')}"
+    with pool.connection() as conn:
+        if op == "add":
+            row = conn.execute(
+                "INSERT INTO flags (session_id, note, created_by) VALUES (%s, %s, %s) "
+                # 再フラグでもcreated_byは初回の出所を残す(noteのみ更新)
+                "ON CONFLICT (session_id) DO UPDATE SET note = excluded.note "
+                "RETURNING session_id",
+                (session_id, mask_text(note), created_by),
+            ).fetchone()
+            return {"session_id": row[0], "op": "add"}
+        row = conn.execute(
+            "DELETE FROM flags WHERE session_id = %s RETURNING session_id",
+            (session_id,),
+        ).fetchone()
+        return {"op": "remove", "deleted": row is not None}
 
 
 @app.post("/inbox", dependencies=[Depends(require_token)])

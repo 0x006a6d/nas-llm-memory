@@ -167,3 +167,183 @@ class TestKanriboCounts(unittest.TestCase):
         with mock.patch.object(server, "DEMO", False), \
              mock.patch.object(server, "run_sql", side_effect=RuntimeError("no table")):
             self.assertIsNone(server.kanribo_counts())
+
+
+def _norm(sql):
+    """SQLの比較用に空白を潰す(条件の書き方が改行で割れても比較できるように)。"""
+    return " ".join(sql.split())
+
+
+class TestShelfCounts(unittest.TestCase):
+    """停留所マップの件数。後閲待ちの条件は shelf_pending_count() が正。"""
+
+    ROWS = [
+        {"id": 1, "state": "executed", "seen_state": "seen"},
+        {"id": 2, "state": "executed", "seen_state": "pending"},
+        {"id": 3, "state": "approved", "seen_state": "pending"},
+        {"id": 4, "state": "pending_decision", "seen_state": "pending"},
+        {"id": 5, "state": "reexamine", "seen_state": "remanded"},
+    ]
+
+    def _sql(self, ret):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "run_sql", return_value=ret) as rs:
+            out = server.shelf_counts()
+        return _norm(rs.call_args[0][0]), out
+
+    def test_all_states_counted(self):
+        sql, out = self._sql("|".join(["0"] * 10))
+        for s in server.SHELF_STATES:
+            self.assertIn(f"count(*) filter (where state='{s}')", sql)
+        self.assertEqual(set(out), set(server.SHELF_STATES) | {"kouetsu_pending", "total"})
+
+    def test_kouetsu_condition_matches_pending_count(self):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "run_sql", return_value="0") as rs:
+            server.shelf_pending_count()
+        cond = _norm(rs.call_args[0][0]).split(" where ", 1)[1].rstrip(";")
+        self.assertIn(cond, self._sql("|".join(["0"] * 10))[0])
+
+    def test_values_map_in_order(self):
+        _, out = self._sql("1|2|3|4|5|6|7|8|9|10")
+        self.assertEqual(out["pending_review"], 1)
+        self.assertEqual(out["reexamine"], 8)
+        self.assertEqual(out["kouetsu_pending"], 9)
+        self.assertEqual(out["total"], 10)
+
+    def test_demo_counts_match_rows(self):
+        with mock.patch.object(server, "DEMO", True), \
+             mock.patch.object(server, "load_json", return_value={"list": self.ROWS}):
+            out = server.shelf_counts()
+        self.assertEqual(out["executed"], 2)
+        self.assertEqual(out["approved"], 1)
+        self.assertEqual(out["pending_decision"], 1)
+        self.assertEqual(out["reexamine"], 1)
+        self.assertEqual(out["pending_review"], 0)
+        # 後閲待ちは shelf_list("pending") と同じ集合(id 2,3)
+        self.assertEqual(out["kouetsu_pending"], 2)
+        self.assertEqual(out["total"], 5)
+
+    def test_counts_none_when_schema_absent(self):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "run_sql", side_effect=RuntimeError("no table")):
+            self.assertIsNone(server.shelf_counts())
+
+
+class TestShelfListState(unittest.TestCase):
+    """state指定も demo判定と本番SQLの条件を揃える。"""
+
+    ROWS = [
+        {"id": 1, "kind": "fact", "state": "executed", "seen_state": "seen"},
+        {"id": 2, "kind": "fact", "state": "executed", "seen_state": "pending"},
+        {"id": 3, "kind": "skill", "state": "approved", "seen_state": "pending"},
+        {"id": 4, "kind": "fact", "state": "remanded_to_drafter", "seen_state": "seen"},
+    ]
+
+    def _demo_ids(self, filt, state, kind=None):
+        rows = [dict(r, doc_no="2026-0001", fiscal_year=2026, seq=1) for r in self.ROWS]
+        with mock.patch.object(server, "DEMO", True), \
+             mock.patch.object(server, "load_json", return_value={"list": rows}):
+            return [r["id"] for r in server.shelf_list(filt, kind, state)]
+
+    def _sql(self, filt, state, kind=None):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "sql_json", return_value=[]) as sq:
+            server.shelf_list(filt, kind, state)
+        return sq.call_args[0][0]
+
+    def test_state_filters_demo_and_sql(self):
+        self.assertEqual(self._demo_ids("all", "executed"), [1, 2])
+        self.assertIn("and state = $dq$executed$dq$", self._sql("all", "executed"))
+
+    def test_state_stacks_on_filt(self):
+        self.assertEqual(self._demo_ids("pending", "executed"), [2])
+        sql = self._sql("pending", "executed")
+        self.assertIn("seen_state = 'pending'", sql)
+        self.assertIn("and state = $dq$executed$dq$", sql)
+
+    def test_state_stacks_on_kind(self):
+        self.assertEqual(self._demo_ids("all", "approved", "skill"), [3])
+        sql = self._sql("all", "approved", "skill")
+        self.assertIn("kind = $dq$skill$dq$", sql)
+        self.assertIn("and state = $dq$approved$dq$", sql)
+
+    def test_no_state_keeps_existing_behaviour(self):
+        self.assertEqual(self._demo_ids("all", None), [1, 2, 3, 4])
+        self.assertEqual(self._sql("all", ""), self._sql("all", None))
+        self.assertNotIn("and state = $", self._sql("all", None))
+
+    def test_unknown_state_rejected(self):
+        for bad in ("bogus", "executed'; drop", "seen"):
+            with self.assertRaises(ValueError):
+                self._demo_ids("all", bad)
+            with self.assertRaises(ValueError):
+                self._sql("all", bad)
+
+    def test_every_state_accepted(self):
+        for s in server.SHELF_STATES:
+            self.assertIn(f"and state = $dq${s}$dq$", self._sql("all", s))
+
+
+class TestShelfReplay(unittest.TestCase):
+    """夜間便リプレイ。便の識別は draft_log.created_by='run-N'(便番号列は無い)。"""
+
+    def _demo(self, run=None):
+        with mock.patch.object(server, "DEMO", True):
+            return server.shelf_replay(run)
+
+    def test_demo_runs_newest_first(self):
+        out = self._demo()
+        self.assertEqual([r["run_id"] for r in out["runs"]], [11, 10])
+        self.assertEqual(out["run_id"], 11)
+        self.assertEqual([r["n"] for r in out["runs"]], [3, 10])
+
+    def test_demo_events_are_log_ordered_and_stamped(self):
+        out = self._demo(10)
+        self.assertEqual(out["run_id"], 10)
+        self.assertEqual([e["id"] for e in out["events"]], [1, 2, 3, 4, 6, 7, 8, 9, 10, 11])
+        self.assertTrue(all(e.get("doc_no_disp") for e in out["events"]))
+        self.assertEqual(out["events"][0]["doc_no_disp"], "記憶第1号(令和8年度)")
+        self.assertEqual(out["events"][0]["draft_id"], 1)
+        self.assertEqual(out["events"][0]["action"], "kian")
+
+    def test_demo_run_selection(self):
+        self.assertEqual([e["draft_id"] for e in self._demo(11)["events"]], [4, 4, 4])
+
+    def test_prod_sql(self):
+        runs = [{"run_id": 11, "n": 3, "t0": "t", "t1": "t"},
+                {"run_id": 10, "n": 10, "t0": "t", "t1": "t"}]
+        events = [{"id": 40, "draft_id": 4, "actor": "kian:m", "action": "kian",
+                   "memo": None, "created_at": "t", "doc_no": "2026-0004",
+                   "fiscal_year": 2026, "seq": 4, "kind": "fact", "title": "t",
+                   "project_key": "p"}]
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "sql_json", side_effect=[runs, events]) as sq:
+            out = server.shelf_replay()
+        runs_sql, ev_sql = _norm(sq.call_args_list[0][0][0]), _norm(sq.call_args_list[1][0][0])
+        self.assertIn("created_by ~ '^run-[0-9]+$'", runs_sql)
+        self.assertIn("group by 1 order by 1 desc limit 10", runs_sql)
+        self.assertIn("join drafts d on d.id = l.draft_id", ev_sql)
+        self.assertIn("where l.created_by = $dq$run-11$dq$", ev_sql)
+        self.assertIn("order by l.id", ev_sql)
+        self.assertEqual(out["run_id"], 11)
+        self.assertEqual(out["events"][0]["doc_no_disp"], "記憶第4号(令和8年度)")
+
+    def test_prod_no_runs(self):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "sql_json", return_value=[]) as sq:
+            self.assertEqual(server.shelf_replay(),
+                             {"runs": [], "run_id": None, "events": []})
+        self.assertEqual(sq.call_count, 1)
+
+    def test_invalid_run_rejected(self):
+        for bad in ("abc", "10; drop", 0, -1):
+            with self.assertRaises(ValueError):
+                self._demo(bad)
+        # 本番分岐でも SQL 実行前に拒否される
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "sql_json") as sq:
+            for bad in ("abc", "10; drop", 0, -1):
+                with self.assertRaises(ValueError):
+                    server.shelf_replay(bad)
+        self.assertEqual(sq.call_count, 0)
