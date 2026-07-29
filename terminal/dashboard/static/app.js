@@ -11,7 +11,7 @@ let S = null;   // /api/state
 let N = null;   // /api/nas
 let factsCache = {};   // project -> rows
 
-// パイプライン順: 収集 → 記録 → 蒸留(スキル/Hooks) → 配布(コンテキスト/routing) → 申し送り
+// パイプライン順: 収集 → 記録 → 編さん(スキル/Hooks) → 配付(例規/routing) → 引継
 // タブ名は公文書事務の語に揃える(スキル/Hooks は固有名詞なのでそのまま)
 const TABS = {
   overview: "文書事務概況",
@@ -26,6 +26,10 @@ const TABS = {
   messages: "事務引継",
   usage: "予算執行",
 };
+
+// fact の検証状態の表示ラベル(DB 値は verified/unverified のまま変えない)
+const FACT_STATUS = { verified: "検証済", unverified: "未検証" };
+const factStatusLabel = (s) => FACT_STATUS[s] || String(s ?? "");
 
 async function j(url, opts) {
   const r = await fetch(url, opts);
@@ -53,7 +57,7 @@ function budgetSegments() {
     .reduce((a, h) => a + new TextEncoder().encode(h.injected).length, 0);
   const general = S.memory_indexes.find((m) => m.key === "general");
   return [
-    { label: "general index", note: "メモリ本文", bytes: general ? general.bytes : 0, color: "var(--amber)" },
+    { label: "general 例規", note: "メモリ本文", bytes: general ? general.bytes : 0, color: "var(--amber)" },
     { label: "hook 注入", note: "作業規律ほか", bytes: inj, color: "var(--blue)" },
     { label: "CLAUDE.md", note: "@include 行", bytes: S.claude_md.bytes, color: "var(--slate)" },
   ];
@@ -81,7 +85,7 @@ function batchWarnings() {
   const out = [];
   const now = Date.now();
   const jobs = [
-    { kind: "nightly", label: "nightly(蒸留)", staleH: 30 },
+    { kind: "nightly", label: "nightly(編さん)", staleH: 30 },
     // backfill は移行期間のみのジョブ。crontab から外した後の欠測は正常なので staleness は見ない
     { kind: "backfill", label: "backfill", staleH: null },
     { kind: "edges", label: "edges(補足関係)", staleH: 30 },
@@ -136,7 +140,7 @@ function warnings() {
   }
   for (const m of S.memory_indexes) {
     if (m.bytes > 32768) out.push({ kind: "warn", tag: "32KiB超",
-      text: `${m.key}/index.md が ${kb(m.bytes)}。Codex 既定の project_doc_max_bytes (32KiB) を超えると連結合計で黙って打ち切られます(この MacBook は 64KiB に拡大済)。` });
+      text: `${m.key} の例規(index.md)が ${kb(m.bytes)}。Codex 既定の project_doc_max_bytes (32KiB) を超えると連結合計で黙って打ち切られます(この MacBook は 64KiB に拡大済)。` });
   }
   const sc = S.skill_candidates || [];
   if (sc.length) out.push({ kind: "info", tag: "スキル候補",
@@ -188,14 +192,14 @@ function renderOverview(el) {
         <div class="pn">${num(turnsTotal)} turns</div>
       </a><span class="parrow">→</span>
       <a class="pstage" href="#facts">
-        <div class="pt">蒸留</div>
+        <div class="pt">編さん</div>
         <div class="pd">夜間バッチ(03:00)が会話から恒久的な事実(facts)を抽出し、繰り返し作業をスキル候補として発掘</div>
         <div class="pn">${num(factsTotal)} facts · 候補 ${cands}</div>
       </a><span class="parrow">→</span>
       <a class="pstage" href="#context">
-        <div class="pt">index 生成</div>
-        <div class="pd">facts からプロジェクト別 index.md を全再生成(配布物。手動編集は翌バッチで上書き)</div>
-        <div class="pn">${S.memory_indexes.length} index</div>
+        <div class="pt">例規 生成</div>
+        <div class="pd">facts からプロジェクト別の例規(index.md)を全再生成(配布物。手動編集は翌バッチで上書き)</div>
+        <div class="pn">${S.memory_indexes.length} 例規</div>
       </a><span class="parrow">→</span>
       <a class="pstage" href="#routing">
         <div class="pt">配付・注入</div>
@@ -203,12 +207,12 @@ function renderOverview(el) {
         <div class="pn">${routedN} 宣言</div>
       </a>
     </div>
-    <div class="note info"><span class="tag">直し方</span><span>恒久的に直す → 「現用文書」タブで facts を修正。繰り返し作業を固定化 → スキル/Hooks タブ。後で見返す会話 → 現用文書タブでフラグ。index の直接編集は翌バッチで上書きされる一時措置です。</span></div>
+    <div class="note info"><span class="tag">直し方</span><span>恒久的に直す → 「現用文書」タブで facts を修正。繰り返し作業を固定化 → スキル/Hooks タブ。後で見返す会話 → 現用文書タブでフラグ。例規の直接編集は翌バッチで上書きされる一時措置です。</span></div>
 
     <div class="numhd"><span class="no">01</span><span class="lb">毎セッション注入されるコンテキスト</span></div>
     <div class="budget-total">
       <span class="kb">${(total / 1024).toFixed(1)}<small>KB</small></span>
-      <span class="faint">プロジェクト内ではそのプロジェクトの index が追加</span>
+      <span class="faint">プロジェクト内ではそのプロジェクトの例規が追加</span>
     </div>
     <div class="card budget-panel">
       <div class="donut" style="background:${grad}">
@@ -247,7 +251,7 @@ function renderOverview(el) {
         ${N.turns_by_project.map((r) => {
           const f = N.facts_by_project.find((x) => x.project_key === r.project_key ||
             x.project_key === keyToIndexDir(r.project_key));
-          return `<tr><td class="mono"><a class="plink" href="#routing" title="配付先タブで、このプロジェクトの index がどの端末に注入されるかを確認・変更">${keyLabel(r.project_key)}</a></td>
+          return `<tr><td class="mono"><a class="plink" href="#routing" title="配付先タブで、このプロジェクトの例規(index.md)がどの端末に注入されるかを確認・変更">${keyLabel(r.project_key)}</a></td>
             <td class="num">${num(r.n)}</td>
             <td class="num">${f ? num(f.n) : "·"}</td>
             <td class="faint mono">${esc(String(r.last_ts || "").slice(0, 16).replace("T", " "))}</td></tr>`;
@@ -320,42 +324,43 @@ function attachLineNumbers(ta, gutter) {
   update();
 }
 
-/* Codex への index 配布物の状態表(例規タブ)。Codex には @include 構文が
-   無いため、agents_sync.py(sender 実行時)が index をファイルに直接展開する。 */
+/* Codex への例規配布物の状態表(例規タブ)。Codex には @include 構文が
+   無いため、agents_sync.py(sender 実行時)が例規をファイルに直接展開する。
+   グローバル ~/.codex/AGENTS.md は上のファイル一覧に CLAUDE.md と同格で出すので、
+   ここはプロジェクト別の AGENTS.override.md の生成状態だけを扱う。 */
 function codexAgentsHtml() {
   const C = S.codex_agents;
   if (!C) return "";
-  const cell = (st, needManaged) => {
+  const cell = (st) => {
     if (!st) return '<span class="chip err">なし</span>';
-    const chips = needManaged
-      ? (st.managed ? '<span class="chip ok">管理セクションあり</span>'
-                    : '<span class="chip warn">管理セクションなし(未展開)</span>')
-      : "";
-    return `${chips} <span class="mono">${kb(st.bytes)}</span> <span class="mono faint">更新 ${esc(st.mtime)}</span>`;
+    return `<span class="mono">${kb(st.bytes)}</span> <span class="mono faint">更新 ${esc(st.mtime)}</span>`;
   };
-  const g = C.global;
   return `
-    <h2 class="section">Codex 側配布(AGENTS.md 管理セクション / AGENTS.override.md)</h2>
-    <div class="note info"><span class="tag">仕組み</span><span>Codex には @include 構文が無いため、hooks/agents_sync.py(sender 実行時 = SessionStart+毎時)が記憶 index をファイルに直接展開して配布します。グローバルは ~/.codex/AGENTS.md のマーカー区切り管理セクション、プロジェクトは「手書き AGENTS.md 全文 + そのプロジェクトの index」を結合した AGENTS.override.md(git 追跡外)。ここは生成状態の確認のみで、編集は手書き AGENTS.md か「現用文書」へ。プロジェクトの登録は <span class="mono">agents_sync.py register</span>(一覧: ${esc(C.registry_path)})。</span></div>
+    <h2 class="section">Codex 側配布(プロジェクト別 AGENTS.override.md)</h2>
+    <div class="note info"><span class="tag">仕組み</span><span>Codex には @include 構文が無いため、hooks/agents_sync.py(sender 実行時 = SessionStart+毎時)が記憶の例規(index.md)をファイルに直接展開して配布します。グローバルは ~/.codex/AGENTS.md のマーカー区切り管理セクション(上のファイル一覧で本文を確認できます)、プロジェクトは「手書き AGENTS.md 全文 + そのプロジェクトの例規」を結合した AGENTS.override.md(git 追跡外)。ここは生成状態の確認のみで、編集は手書き AGENTS.md か「現用文書」へ。プロジェクトの登録は <span class="mono">agents_sync.py register</span>(一覧: ${esc(C.registry_path)})。</span></div>
     <div class="card"><table>
       <tr><th>対象</th><th>手書き AGENTS.md</th><th>配布物</th></tr>
-      <tr>
-        <td class="mono">グローバル ~/.codex/AGENTS.md</td>
-        <td class="faint">(同一ファイル内・管理セクション外)</td>
-        <td>${cell(g, true)}</td>
-      </tr>
-      ${C.projects.map((p) => `<tr>
+      ${C.projects.length ? C.projects.map((p) => `<tr>
         <td class="mono">${esc(p.dir)}</td>
         <td>${p.agents ? `<span class="mono">${kb(p.agents.bytes)}</span>` : '<span class="chip warn">なし</span>'}</td>
-        <td>${p.override ? `<span class="chip ok">AGENTS.override.md</span> ${cell(p.override, false)}` : '<span class="chip err">未生成</span>'}</td>
-      </tr>`).join("")}
+        <td>${p.override ? `<span class="chip ok">AGENTS.override.md</span> ${cell(p.override)}` : '<span class="chip err">未生成</span>'}</td>
+      </tr>`).join("") : '<tr><td colspan="3" class="faint">登録プロジェクトはありません。</td></tr>'}
     </table></div>`;
 }
 
 function renderContext(el) {
+  // グローバルの手引き2本(Claude の CLAUDE.md / Codex の AGENTS.md)は同格。
+  // どちらも自動生成物なのでここでは読み取り専用(target 無し=保存ボタン無し)。
+  const cg = (S.codex_agents || {}).global;
   const files = [
     { key: "CLAUDE.md", target: null, bytes: S.claude_md.bytes,
       content: S.claude_md.content, note: "~/.claude/CLAUDE.md — @include の起点(読み取り専用)", mtime: "" },
+    { key: "AGENTS.md", target: null, bytes: cg ? cg.bytes : 0,
+      content: cg ? (cg.content || "") : "",
+      note: cg
+        ? `~/.codex/AGENTS.md — 管理セクションは例規から自動展開(読み取り専用)${cg.managed ? "" : " ※管理セクション未展開"}`
+        : "~/.codex/AGENTS.md — 未生成(読み取り専用)",
+      mtime: cg ? cg.mtime : "" },
     ...S.memory_indexes.map((m) => ({
       key: m.key, target: `index:${m.key}`, bytes: m.bytes, content: m.content,
       auto: m.auto_generated, mtime: m.mtime,
@@ -363,8 +368,8 @@ function renderContext(el) {
     })),
   ];
   el.innerHTML = `
-    <div class="note warn"><span class="tag">前提</span><span>index.md は夜間バッチ(03:00)が current_facts から全再生成します。ここでの直接編集は即座に反映されますが翌バッチで上書きされます。恒久的に直したい内容は「現用文書」タブで facts を修正してください。</span></div>
-    <div class="note info"><span class="tag">凡例</span><span>一覧は claude-config/memory/ 配下の全端末・全プロジェクト分の実ファイルで、<b>全部が読み込まれるわけではありません</b>。1セッションに注入されるのは「CLAUDE.md + general」と、そのプロジェクトで開いたときのそのプロジェクトの index 1本だけ(routing 宣言に従う)。<span class="chip amber">auto</span> = 夜間バッチが再生成するファイル。<span class="devtag">端末名</span> = そのプロジェクトを主に使っている端末(会話履歴 turns からの推定)。</span></div>
+    <div class="note warn"><span class="tag">前提</span><span>例規(index.md)は夜間バッチ(03:00)が current_facts から全再生成します。ここでの直接編集は即座に反映されますが翌バッチで上書きされます。恒久的に直したい内容は「現用文書」タブで facts を修正してください。</span></div>
+    <div class="note info"><span class="tag">凡例</span><span>一覧は claude-config/memory/ 配下の全端末・全プロジェクト分の実ファイルで、<b>全部が読み込まれるわけではありません</b>。1セッションに注入されるのは「CLAUDE.md(Codex は AGENTS.md)+ general」と、そのプロジェクトで開いたときのそのプロジェクトの例規 1本だけ(routing 宣言に従う)。<span class="chip amber">auto</span> = 夜間バッチが再生成するファイル。<span class="devtag">端末名</span> = そのプロジェクトを主に使っている端末(会話履歴 turns からの推定)。</span></div>
     <div class="split" style="margin-top:14px">
       <div class="card filelist" id="ctxList"></div>
       <div class="card" id="ctxEditor"></div>
@@ -387,7 +392,7 @@ function renderContext(el) {
       { label: "帰属不明(turns 実績なし)", items: [] },
     ];
     for (const f of files) {
-      if (f.key === "CLAUDE.md" || f.key === "general") groups[0].items.push(f);
+      if (f.key === "CLAUDE.md" || f.key === "AGENTS.md" || f.key === "general") groups[0].items.push(f);
       else {
         const dev = deviceOf(f.key);
         groups[dev === localDev ? 1 : dev ? 2 : 3].items.push(f);
@@ -456,8 +461,8 @@ function renderFacts(el) {
   let sel = projects[0] || "general";
 
   el.innerHTML = `
-    <div class="note info"><span class="tag">用語</span><span><b>turns</b> = 全端末・全エージェント(claude/codex)の生の発話ログ(1発話=1行、NAS に蓄積)。<b>facts</b> = そこから蒸留された恒久的な事実。この画面に出るのは current_facts(撤去済みを除いた、生きている facts だけ)です。</span></div>
-    <div class="note info"><span class="tag">正道</span><span>ここが恒久的なコンテキスト調整の場所です。facts への追加・修正・撤去は、次回の夜間バッチ(03:00)で各 index.md に反映されます。</span></div>
+    <div class="note info"><span class="tag">用語</span><span><b>turns</b> = 全端末・全エージェント(claude/codex)の生の発話ログ(1発話=1行、NAS に蓄積)。<b>facts</b> = そこから整理・登載された恒久的な事実。この画面に出るのは current_facts(撤去済みを除いた、生きている facts だけ)です。</span></div>
+    <div class="note info"><span class="tag">正道</span><span>ここが恒久的なコンテキスト調整の場所です。facts への追加・修正・撤去は、次回の夜間バッチ(03:00)で各プロジェクトの例規(index.md)に反映されます。</span></div>
     <div class="toolrow" id="factProjects" style="margin-top:14px"></div>
     <div class="card" style="margin-bottom:14px">
       <div class="toolrow" style="margin-bottom:0">
@@ -484,7 +489,7 @@ function renderFacts(el) {
       <div id="turnResults" class="faint">キーワードを入れて検索してください。</div>
     </div>
 
-    <h2 class="section">auto memory スナップショット — 各端末の内蔵メモリ(MEMORY.md 等)の取り込み履歴。夜間バッチが index との食い違い時の参考に使う補助データ</h2>
+    <h2 class="section">auto memory スナップショット — 各端末の内蔵メモリ(MEMORY.md 等)の取り込み履歴。夜間バッチが例規との食い違い時の参考に使う補助データ</h2>
     <div class="card" id="amList"></div>`;
 
   const projRow = $("#factProjects", el);
@@ -518,7 +523,7 @@ function renderFacts(el) {
       <div class="fact-row" data-id="${f.id}">
         <div class="fact-meta">
           <span class="fact-id">#${f.id}</span>
-          <span class="chip ${f.status === "verified" ? "ok" : "warn"}" title="fact の検証状態。verified = 事実として確定。それ以外はバッチが自動抽出した未確定情報">${esc(f.status)}</span>
+          <span class="chip ${f.status === "verified" ? "ok" : "warn"}" title="fact の検証状態。検証済 = 事実として確定。それ以外はバッチが自動抽出した未確定情報">${esc(factStatusLabel(f.status))}</span>
           <span class="fact-id">${esc(String(f.created_at || "").slice(0, 10))}<br>${esc(f.created_by || "")}</span>
         </div>
         <div class="fact-field">
@@ -557,7 +562,7 @@ function renderFacts(el) {
         try {
           await j("/api/fact", { method: "POST", body: JSON.stringify(
             { op: "replace", id, content, project: sel }) });
-          toast(`#${id} を置換しました(次回バッチで index に反映)`);
+          toast(`#${id} を置換しました(次回バッチで例規に反映)`);
           await loadFacts(true);
         } catch (e) { toast(`失敗: ${e.message}`, 5000); }
       };
@@ -585,7 +590,7 @@ function renderFacts(el) {
     try {
       await j("/api/fact", { method: "POST", body: JSON.stringify(
         { op: "add", project: sel, content: input.value.trim() }) });
-      toast("追加しました(次回バッチで index に反映)");
+      toast("追加しました(次回バッチで例規に反映)");
       input.value = "";
       await loadFacts(true);
     } catch (e) { toast(`失敗: ${e.message}`, 5000); }
@@ -847,7 +852,7 @@ function renderShelf(el) {
   const kind = renderShelf._kind || "";
   const state = renderShelf._state || "";
   el.innerHTML = `
-    <div class="note info"><span class="tag">仕組み</span><span>夜間バッチの判断(facts登載・index改定・skill登載)は起案文書として起票され、審査(課長専決)・決裁(部長)を経て施行されます。人間はここで<b>後閲</b>します: 妥当なら後閲印、問題があれば<b>メモを付けて差し戻し</b> — 翌晩の便で決裁者が再審理し、是正文書を起票します。skillの施行(全端末配布)だけは後閲印が条件です。決裁が付かなかった案件は<b>未決</b>として繰り越され(承認も廃案もしない)、翌晩に再審理されます。</span></div>
+    <div class="note info"><span class="tag">仕組み</span><span>夜間バッチの判断(facts登載・例規改定・skill登載)は起案文書として起票され、審査(課長専決)・決裁(部長)を経て施行されます。人間はここで<b>後閲</b>します: 妥当なら後閲印、問題があれば<b>メモを付けて差し戻し</b> — 翌晩の便で決裁者が再審理し、是正文書を起票します。skillの施行(全端末配布)だけは後閲印が条件です。決裁が付かなかった案件は<b>未決</b>として繰り越され(承認も廃案もしない)、翌晩に再審理されます。</span></div>
     <div class="card" id="stnMap" style="margin-top:14px">読み込み中…</div>
     <div class="card" id="replayCard" style="margin-top:14px"></div>
     <h2 class="section">専決規程(モデルの役割分担) — NAS batch/config.json</h2>
@@ -950,7 +955,7 @@ function renderShelf(el) {
           <tr><th>id</th><th>内容</th><th>状態</th></tr>
           ${d.facts.map((f) => `<tr><td class="num">${f.id}</td>
             <td style="white-space:pre-wrap">${esc(f.content)}</td>
-            <td><span class="chip ${f.status === "verified" ? "ok" : "warn"}">${esc(f.status)}</span>
+            <td><span class="chip ${f.status === "verified" ? "ok" : "warn"}">${esc(factStatusLabel(f.status))}</span>
               ${f.retired ? '<span class="chip err">撤去済</span>' : ""}
               ${f.superseded ? '<span class="chip warn">置換済</span>' : ""}</td></tr>`).join("")}
         </table>` : ""}
@@ -1244,7 +1249,7 @@ function drawKitei(card) {
   const ROLE_LABEL = { kian: "起案(係員) — turnsから事実候補を調べ上げる",
     shinsa: "審査(課長) — 既存factsと照合、軽易案件を専決",
     kessai: "決裁(部長) — 置換・撤回・矛盾疑いの上申案件",
-    enrich: "index生成 — 決裁済みfactsからindexを起草" };
+    enrich: "例規起草 — 決裁済みfactsから例規(index.md)を起草" };
   card.innerHTML = `
     <div class="note info"><span class="tag">反映</span><span>保存すると NAS の config.json に書き戻され(旧内容は .bak 退避)、<b>翌晩のバッチから</b>反映されます。空欄の役割は共通modelにフォールバックします。</span></div>
     <table>
@@ -1383,7 +1388,7 @@ function renderSkills(el) {
         <td class="muted">${esc(r.description || "—")}</td></tr>`).join("")}
     </table></div>`;
 
-  el.innerHTML = '<div class="note info"><span class="tag">このタブ</span><span>パイプラインの蒸留段: 繰り返し作業を手順書(SKILL.md)として固定化したものがスキルです。夜間バッチが turns から繰り返しを発掘するとスキル候補としてここに並びます。使用実績は claude/codex 同列で数えます。</span></div>'
+  el.innerHTML = '<div class="note info"><span class="tag">このタブ</span><span>パイプラインの編さん段: 繰り返し作業を手順書(SKILL.md)として固定化したものがスキルです。夜間バッチが turns から繰り返しを発掘するとスキル候補としてここに並びます。使用実績は claude/codex 同列で数えます。</span></div>'
     + candHtml
     + '<div class="note info"><span class="tag">範囲</span><span>/context に出る構成要素のうちファイル実体があるもの(スキル・コマンド・エージェント)を出所別に、実体が無いもの(内蔵・実行時組み立て)を最後にまとめています。「編集不可」のものを変えたいときは、プラグインなら配布元リポジトリ、内蔵なら Claude Code 本体の更新でしか変わりません。</span></div>'
     + '<div class="note info"><span class="tag">発動と参照</span><span>言葉を分けているのは数字の確度が違うためです。<b>Claude 発動</b> = Claude Code の Skill ツール呼び出し回数。構造化された呼び出しがログ(~/.claude/projects)に残るので、確実に使われた回数です。<b>Codex 参照</b> = Codex が SKILL.md を読んだ回数。Codex には Skill ツールが無く、シェルで手順書を読む形しかログ(~/.codex/sessions)に残らないため近似値です — 検討だけして使わなかった場合も数え、読み直さずに再利用した場合は数えません。共通の限界: 手順を手作業でなぞった使用、他端末、ローテートで消えた古いログは含まず、0 = 記録なし(未使用とは限らない)。</span></div>'
@@ -1521,7 +1526,7 @@ function renderCollect(el) {
     <h2 class="section">バッチ実行履歴(直近${N.batch_runs.length}件)</h2>
     <div class="note info"><span class="tag">読み方</span><span>時刻は UTC(KST−9時間)。ロック敗退や cron 起動失敗はここに row を残さず「時間が来ても行が増えない」形で現れます — その検知は文書事務概況タブの注意欄(未記録・成功が古い・滞留)が担当します。</span></div>
     <div class="card"><table>
-      <tr><th>run</th><th>種別</th><th>開始</th><th>終了</th><th>状態</th><th style="text-align:right">turns処理</th><th style="text-align:right">index行</th><th>メモ</th></tr>
+      <tr><th>run</th><th>種別</th><th>開始</th><th>終了</th><th>状態</th><th style="text-align:right">turns処理</th><th style="text-align:right">例規行</th><th>メモ</th></tr>
       ${N.batch_runs.map((b) => `<tr>
         <td class="num">${b.id}</td>
         <td class="mono">${esc(batchKind(b.notes))}</td>
@@ -1592,7 +1597,7 @@ function renderRouting(el) {
     ? R.parsed[dev].projects : null;
 
   el.innerHTML = `
-    <div class="note info"><span class="tag">仕組み</span><span>パイプラインの配布段です。この表で「どの端末にどのプロジェクトの記憶(index)を配るか」を決めます。チェック=配る。保存すると各端末に配られ、次にセッションを開いたときに反映されます。まだ一度も設定していない端末は、チェックを付けて保存した時からこの表に従います。設定ファイル(routing.json)は git で全端末に配布され、各端末が自分の端末名のエントリだけを読みます(この端末のコピー: <span class="mono">${esc(R.path)}</span>)。</span></div>
+    <div class="note info"><span class="tag">仕組み</span><span>パイプラインの配布段です。この表で「どの端末にどのプロジェクトの記憶(例規 index.md)を配るか」を決めます。チェック=配る。保存すると各端末に配られ、次にセッションを開いたときに反映されます。まだ一度も設定していない端末は、チェックを付けて保存した時からこの表に従います。設定ファイル(routing.json)は git で全端末に配布され、各端末が自分の端末名のエントリだけを読みます(この端末のコピー: <span class="mono">${esc(R.path)}</span>)。</span></div>
     ${R.error ? `<div class="note warn"><span class="tag">解析失敗</span><span>routing.json: ${esc(R.error)}</span></div>` : ""}
     <div class="card" style="margin-top:14px">
       <table>

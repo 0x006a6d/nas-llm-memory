@@ -778,19 +778,24 @@ def codex_agents_state():
     """
     marker = "<!-- nas-memory:begin"
 
-    def stat(p):
+    def stat(p, with_content=False):
         if not p.is_file():
             return None
         text = read_text(p) or ""
-        return {"path": str(p), "bytes": len(text.encode()),
-                "managed": marker in text,
-                "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d %H:%M")}
+        out = {"path": str(p), "bytes": len(text.encode()),
+               "managed": marker in text,
+               "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%m-%d %H:%M")}
+        if with_content:
+            # 例規タブのファイル一覧で CLAUDE.md と同格に本文を出すため
+            # (claude_md と同じく全文をそのまま渡す)
+            out["content"] = text
+        return out
 
     reg = load_json(HOME / ".claude-spool" / "codex-projects.json", [])
     if not isinstance(reg, list):  # 手編集等でオブジェクト化していた場合に壊れないよう
         reg = []
     return {
-        "global": stat(HOME / ".codex" / "AGENTS.md"),
+        "global": stat(HOME / ".codex" / "AGENTS.md", with_content=True),
         "registry_path": str(HOME / ".claude-spool" / "codex-projects.json"),
         "projects": [{"dir": p,
                       "agents": stat(Path(p) / "AGENTS.md"),

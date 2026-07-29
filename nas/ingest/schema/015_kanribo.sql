@@ -75,7 +75,7 @@ VALUES
   ('shuju-memo',  'auto_memory_snapshots', 'received_at',  0, 1, 'haiki', 'kouetsu',
    '各端末の内蔵メモリ取り込み履歴'),
   ('kiroku-fact', 'facts',                 'created_at',   0, 0, 'jouyou', 'kouetsu',
-   '事実層。常用(満了しない)。退役分の扱いは別途'),
+   '事実層。常用(満了しない)。失効分の扱いは別途'),
   ('kessai-doc',  'drafts',                'created_at',   0, 10, 'ikan', 'kouetsu',
    '起案・決裁文書。10年で移管(廃棄しない)'),
   ('renraku-msg', 'messages',              'created_at',   0, 1, 'haiki', 'kouetsu',
