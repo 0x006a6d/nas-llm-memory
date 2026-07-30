@@ -11,7 +11,11 @@ set -euo pipefail
 BACKFILL_CONFIG_DIR="$(cd -- "$(dirname -- "$0")/.." && pwd)" || exit 1
 export BACKFILL_CONFIG_DIR
 
-exec python3 - <<'PYEOF'
+# 動くpython3を使う(存在するだけの壊れた python3 を掴まない。find_python.sh 参照)
+. "$BACKFILL_CONFIG_DIR/hooks/find_python.sh"
+PY=$(find_python) || { echo "ERROR: 動く python3 が見つかりません" >&2; exit 1; }
+
+exec "$PY" - <<'PYEOF'
 import hashlib
 import json
 import os
