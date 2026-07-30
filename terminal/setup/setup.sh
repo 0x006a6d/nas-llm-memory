@@ -19,8 +19,12 @@ SPOOL_DIR="$HOME/.claude-spool"
 echo "== claude-config 端末セットアップ ($CONFIG_DIR) =="
 
 # 0. 前提確認
-command -v python3 >/dev/null || { echo "ERROR: python3 が必要です"; exit 1; }
-command -v git >/dev/null || { echo "ERROR: git が必要です"; exit 1; }
+# 存在確認だけにしない: macOSの /usr/bin/python3 は CommandLineTools が壊れていると
+# 存在しても xcrun エラーで落ちる(Mac miniで実際に起きた)。動くものを探す
+. "$CONFIG_DIR/hooks/find_python.sh"
+PY=$(find_python) || { echo "ERROR: 動く python3 が必要です"; exit 1; }
+command -v git >/dev/null && git --version >/dev/null 2>&1 \
+    || { echo "ERROR: 動く git が必要です"; exit 1; }
 [ -d "$CONFIG_DIR/hooks" ] || { echo "ERROR: $CONFIG_DIR/hooks がありません"; exit 1; }
 
 mkdir -p "$CLAUDE_DIR" "$SPOOL_DIR/pending" "$SPOOL_DIR/sent"
@@ -37,7 +41,7 @@ if [ -d "$CONFIG_DIR/skills" ]; then
 fi
 
 # 2. settings.json にhooksをマージ(既存設定は保持)
-python3 - "$CLAUDE_DIR/settings.json" "$CONFIG_DIR/templates/settings.json.tmpl" "$CONFIG_DIR" <<'PYEOF'
+"$PY" - "$CLAUDE_DIR/settings.json" "$CONFIG_DIR/templates/settings.json.tmpl" "$CONFIG_DIR" <<'PYEOF'
 import json, os, sys
 settings_path, tmpl_path, config_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -102,7 +106,7 @@ if [ ! -f "$SPOOL_DIR/config.json" ]; then
     read -rs TOKEN
     echo
     umask 077
-    TOKEN="$TOKEN" python3 - "$SPOOL_DIR/config.json" "$INGEST_URL" "$CERT_FILE" <<'PYEOF'
+    TOKEN="$TOKEN" "$PY" - "$SPOOL_DIR/config.json" "$INGEST_URL" "$CERT_FILE" <<'PYEOF'
 import json, os, sys
 json.dump({"ingest_url": sys.argv[2], "api_token": os.environ["TOKEN"],
            "tls_cert": sys.argv[3]}, open(sys.argv[1], "w"))
@@ -123,7 +127,7 @@ Darwin)
 <plist version="1.0"><dict>
   <key>Label</key><string>com.claude.spool-sender</string>
   <key>ProgramArguments</key><array>
-    <string>$(command -v python3)</string>
+    <string>$PY</string>
     <string>$CONFIG_DIR/hooks/sender.py</string>
   </array>
   <key>StartInterval</key><integer>3600</integer>
@@ -135,7 +139,7 @@ EOF
     echo "  launchd: 1時間おきのsender登録"
     ;;
 Linux)
-    CRON_LINE="17 * * * * python3 $CONFIG_DIR/hooks/sender.py"
+    CRON_LINE="17 * * * * $PY $CONFIG_DIR/hooks/sender.py"
     ( crontab -l 2>/dev/null | grep -v "hooks/sender.py"; echo "$CRON_LINE" ) | crontab -
     echo "  cron: 1時間おきのsender登録"
     ;;
@@ -154,7 +158,7 @@ fi
 
 echo "== 完了 =="
 echo "プロジェクトごとのindex注入(両エージェント統合・Codex追補§3.2)は、プロジェクトごとに"
-echo "  python3 $CONFIG_DIR/hooks/agents_sync.py register <project-dir>"
+echo "  $PY $CONFIG_DIR/hooks/agents_sync.py register <project-dir>"
 echo "を実行してください(AGENTS.override.md が生成され、CodexとClaude Code両方が読む。"
 echo "Claude Code側はプロジェクトCLAUDE.mdに @AGENTS.override.md を追記、"
 echo "手書き指示はAGENTS.mdへ一本化。indexは夜間バッチが生成した時点から有効)"

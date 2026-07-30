@@ -146,9 +146,11 @@ class TestSessionStartScript(unittest.TestCase):
                                         capture_output=True).returncode, 0)
 
     def test_probes_candidates_in_order(self):
+        resolver = (HOOKS / "find_python.sh").read_text(encoding="utf-8")
         self.assertIn("/opt/homebrew/bin/python3 /usr/local/bin/python3 python3 /usr/bin/python3",
-                      self.SCRIPT)
-        self.assertIn("--version >/dev/null 2>&1", self.SCRIPT)   # 存在確認だけにしない
+                      resolver)
+        self.assertIn("--version >/dev/null 2>&1", resolver)   # 存在確認だけにしない
+        self.assertIn("find_python.sh", self.SCRIPT)           # hookはそれを使う
 
     def test_records_when_no_python(self):
         self.assertIn("no working python3", self.SCRIPT)
@@ -172,11 +174,62 @@ class TestSessionStartScript(unittest.TestCase):
             (fake_hooks / name).write_text(
                 f"open({str(marker)!r}, 'a').write({name!r} + chr(10))\n", encoding="utf-8")
         shutil.copy(HOOKS / "session_start.sh", fake_hooks / "session_start.sh")
+        shutil.copy(HOOKS / "find_python.sh", fake_hooks / "find_python.sh")
         env = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
         # 実機の /usr/bin/python3 が壊れていても候補探索で拾えることを見る
-        subprocess.run(["sh", str(fake_hooks / "session_start.sh")], env=env,
+        subprocess.run(["/bin/sh", str(fake_hooks / "session_start.sh")], env=env,
                        capture_output=True, timeout=60)
         self.assertIn("inbox_check.py", marker.read_text(encoding="utf-8"))
+
+
+class TestSharedPythonResolver(unittest.TestCase):
+    """python3の解決は1か所(find_python.sh)に集約し、各スクリプトはそれを使う。"""
+
+    def test_resolver_picks_working_interpreter(self):
+        out = subprocess.run(
+            ["/bin/sh", "-c", f'. "{HOOKS}/find_python.sh"; find_python'],
+            capture_output=True, text=True, timeout=60,
+            env={"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        py = out.stdout.strip()
+        self.assertTrue(py)
+        # 返ってきたものが実際に動くこと(存在確認だけで済ませていない)
+        self.assertEqual(subprocess.run([py, "--version"], capture_output=True,
+                                        timeout=30).returncode, 0)
+
+    def test_broken_interpreter_on_path_is_skipped(self):
+        """PATH上に「存在するが動かない python3」があっても掴まない。
+
+        Mac miniの /usr/bin/python3 がこれ(CommandLineTools不在でxcrunエラー)。
+        候補が1つも動かない場合の分岐は find_git 側のテストでモック検査している。
+        """
+        d = Path(tempfile.mkdtemp(prefix="brokenpy-"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        broken = d / "python3"
+        broken.write_text("#!/bin/sh\necho 'xcrun: error' >&2\nexit 1\n", encoding="utf-8")
+        broken.chmod(0o755)
+        out = subprocess.run(
+            ["/bin/sh", "-c", f'. "{HOOKS}/find_python.sh"; find_python'],
+            capture_output=True, text=True, timeout=60,
+            env={"PATH": f"{d}:/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        py = out.stdout.strip()
+        self.assertNotEqual(py, str(broken))
+        self.assertEqual(subprocess.run([py, "--version"], capture_output=True,
+                                        timeout=30).returncode, 0)
+
+    def test_scripts_use_the_resolver(self):
+        for rel in ("hooks/session_start.sh", "setup/backfill-claude.sh", "setup/setup.sh"):
+            text = (ROOT / "terminal" / rel).read_text(encoding="utf-8")
+            self.assertIn("find_python.sh", text, f"{rel} が共通処理を使っていない")
+            self.assertIn("find_python)", text, f"{rel} が解決結果を使っていない")
+
+    def test_setup_records_absolute_interpreter(self):
+        """launchd/cron に登録するのは「動く」python3の絶対パス。"""
+        text = (ROOT / "terminal" / "setup" / "setup.sh").read_text(encoding="utf-8")
+        self.assertIn("<string>$PY</string>", text)
+        self.assertIn('CRON_LINE="17 * * * * $PY', text)
+        self.assertNotIn("$(command -v python3)", text)
 
 
 if __name__ == "__main__":
