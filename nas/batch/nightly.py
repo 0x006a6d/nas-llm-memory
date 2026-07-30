@@ -122,19 +122,35 @@ def ask_claude(prompt: str, label: str, model: str | None = None) -> str:
     m = BATCH_MODEL if model is None else model
     if m:
         cmd += ["--model", m]
-    r = subprocess.run(
-        cmd,
-        input=prompt, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
-        env={**os.environ, "CLAUDE_SPOOL_SKIP": "1"},  # バッチ自身のセッションは収集しない
-    )
-    if r.returncode != 0:
-        # 失敗応答にも消費分のusage/costが入る(SDKは失敗時点までを計上する)
+    envelope = None
+    for attempt in (1, 2):
+        r = subprocess.run(
+            cmd,
+            input=prompt, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
+            env={**os.environ, "CLAUDE_SPOOL_SKIP": "1"},  # バッチ自身のセッションは収集しない
+        )
+        if r.returncode != 0:
+            # 失敗応答にも消費分のusage/costが入る(SDKは失敗時点までを計上する)
+            try:
+                _log_usage(label, json.loads(r.stdout))
+            except Exception:
+                pass
+            raise RuntimeError(f"claude failed ({label}): {r.stderr.strip()[:500]}")
         try:
-            _log_usage(label, json.loads(r.stdout))
-        except Exception:
-            pass
-        raise RuntimeError(f"claude failed ({label}): {r.stderr.strip()[:500]}")
-    envelope = json.loads(r.stdout)
+            envelope = json.loads(r.stdout)
+            break
+        except json.JSONDecodeError as exc:
+            # 終了コード0でも壊れた出力(途中で切れた配列等)が返ることがある。
+            # 素のJSONDecodeErrorはどの呼び出しか分からずrunだけが落ちるので、
+            # 1度だけ問い直し、それでも駄目なら何が返ってきたかを添えて失敗させる
+            head = (r.stdout or "")[:200].replace("\n", "\\n")
+            if attempt == 1:
+                log(f"  WARN claude出力がJSONでない({label}): 問い直す "
+                    f"stdout[:80]={head[:80]!r}")
+                continue
+            raise RuntimeError(
+                f"claude output not json ({label}): {exc} "
+                f"stdout[:200]={head!r} stderr={r.stderr.strip()[:200]}") from exc
     _log_usage(label, envelope)
     if envelope.get("subtype") != "success":
         raise RuntimeError(f"claude non-success ({label}): {str(envelope)[:300]}")
