@@ -147,6 +147,12 @@ function warnings() {
     text: `未採用のスキル候補が ${sc.length} 件あります(スキルタブで確認。採用するときはセッションで「◯◯ を採用して」)。` });
   if (N.shelf_pending) out.push({ kind: "info", tag: "後閲待ち",
     text: `後閲待ちの決裁文書が ${N.shelf_pending} 件あります(書庫タブで後閲印または差し戻し)。` });
+  const sy = (S.spool || {}).sync;
+  if (sy && sy.failures >= 2) out.push({ kind: "warn", tag: "設定同期",
+    text: `この端末の設定同期(git pull)が ${sy.failures} 回続けて失敗しています` +
+      (sy.days_since_success !== null && sy.days_since_success !== undefined
+        ? `(最後に成功したのは ${sy.days_since_success} 日前)` : "(成功記録なし)") +
+      `。配布された hooks・skills・記憶 index が古いままです: ${esc(sy.last_error || "")}` });
   if (N.kanribo && N.kanribo.manryou) out.push({ kind: "warn", tag: "満了",
     text: `保存期間が満了した行政文書ファイルが ${N.kanribo.manryou} 件あります(管理簿タブで確認。夜間バッチが廃棄伺い・移管として起票します)。` });
   if (N.shelf_miketsu) out.push({ kind: "info", tag: "未決",
@@ -797,6 +803,16 @@ const SHELF_ACTION = { kian: "起案", hosei: "補正", shinsa_ok: "審査済(�
 // 文書番号の表示形式はサーバが付ける(表記規則の正は ringi.display_doc_no。
 // 令和元年度の扱いをここに重複させない)
 const docNoDisp = (r) => r.doc_no_disp || r.doc_no;
+/* 設定同期(SessionStartのgit pull)の状態。失敗を見えるようにする */
+function syncCell(sy) {
+  if (!sy) return '<span class="faint">記録なし(次のセッションから記録されます)</span>';
+  const last = sy.last_success_at ? String(sy.last_success_at).replace("T", " ") : "—";
+  const age = (sy.days_since_success !== null && sy.days_since_success !== undefined)
+    ? ` <span class="faint">(${sy.days_since_success}日前)</span>` : "";
+  if (!sy.failures) return `<span class="chip ok">成功</span> <span class="mono">${esc(last)}</span>${age}`;
+  return `<span class="chip err">${sy.failures}回連続で失敗</span> <span class="mono">最終成功 ${esc(last)}</span>${age}` +
+    (sy.last_error ? `<div class="faint mono">${esc(sy.last_error)}</div>` : "");
+}
 const chipOf = (map, key) => {
   const [label, cls] = map[key] || [key, ""];
   return `<span class="chip ${cls}">${esc(label)}</span>`;
@@ -1552,6 +1568,7 @@ function renderCollect(el) {
         <tr><td>送信キュー</td><td>pending ${sp.pending ?? "·"} 件 / sent ${sp.sent ?? "·"} 件 <span class="faint">(pending が溜まり続けるのは送信失敗のシグナル)</span></td></tr>
         <tr><td>最終送信</td><td class="mono">${esc(sp.last_sent_at || "—")} <span class="faint">sender は毎時17分</span></td></tr>
         <tr><td>memory スキャン</td><td class="mono">${esc(sp.last_memory_scan_at || "—")}</td></tr>
+        <tr><td>設定同期(git pull)</td><td>${syncCell(sp.sync)}</td></tr>
       </table></div>`;
     })()}
 
