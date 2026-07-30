@@ -52,6 +52,11 @@ SOURCES = {
         "key": "coalesce(project_key, 'general')", "id": "id", "where": None,
         "location": "DB batch_runs",
     },
+    "kanri-shakuran": {
+        "label": "借覧簿", "table": "lending_log", "ts": "at",
+        "key": "'general'", "id": "id", "where": None,
+        "location": "DB lending_log",
+    },
 }
 
 MEASURE_LABEL = {"ikan": "移管", "haiki": "廃棄", "jouyou": "常用"}
@@ -384,7 +389,15 @@ def tenken_sql() -> str:
         "            WHERE state='genyou' AND expires_on <= current_date), "
         "'unfiled', (SELECT count(*) FROM record_files "
         "            WHERE state='manryou' AND disposed_draft IS NULL "
-        "            AND measure <> 'jouyou'));"
+        "            AND measure <> 'jouyou'), "
+        # 原本保管(017_genpon)の検証: 封緘ハッシュの再計算照合と改変禁止トリガの存在
+        "'genpon_ihan', (SELECT count(*) FROM drafts WHERE decided_at IS NOT NULL "
+        "                AND (sealed_sha IS NULL OR sealed_sha <> "
+        "                     encode(digest(doc_no || E'\\n' || title || E'\\n' || "
+        "                     proposal || E'\\n' || payload::text, 'sha256'), 'hex'))), "
+        "'genpon_trigger', (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal "
+        "                   AND tgname IN ('drafts_genpon_guard_tg', "
+        "                                  'draft_log_append_only_tg')));"
     )
 
 
@@ -402,7 +415,19 @@ def nendo_report_sql(fy: int) -> str:
         f"'drafts', (SELECT count(*) FROM drafts WHERE fiscal_year = {int(fy)}), "
         f"'miketsu', (SELECT count(*) FROM drafts WHERE state = 'pending_decision'), "
         f"'kouetsu_machi', (SELECT count(*) FROM drafts WHERE seen_state = 'pending' "
-        f"                  AND state IN ('executed','rejected','approved')));"
+        f"                  AND state IN ('executed','rejected','approved')), "
+        # 収受・借覧・後閲の年度統計(docs/bunsho-kanri.md §6)
+        f"'shunyu', (SELECT count(*) FROM raw_payloads "
+        f"           WHERE received_at >= '{int(fy)}-04-01'::date "
+        f"           AND received_at < '{int(fy) + 1}-04-01'::date), "
+        f"'shakuran', (SELECT coalesce(json_object_agg(action, n), '{{}}'::json) FROM "
+        f"             (SELECT action, count(*) AS n FROM lending_log "
+        f"              WHERE at >= '{int(fy)}-04-01'::date "
+        f"              AND at < '{int(fy) + 1}-04-01'::date GROUP BY action) s), "
+        f"'kouetsu_days', (SELECT round((extract(epoch FROM percentile_cont(0.5) "
+        f"                 WITHIN GROUP (ORDER BY seen_at - executed_at)) / 86400.0)"
+        f"                 ::numeric, 1) FROM drafts WHERE seen_at IS NOT NULL "
+        f"                 AND executed_at IS NOT NULL AND fiscal_year = {int(fy)}));"
     )
 
 
@@ -415,6 +440,8 @@ def tenken_items(st: dict) -> list:
         f"措置未設定 {st.get('no_schedule', 0)}件",
         f"満了日を過ぎているのに現用のまま {st.get('overdue', 0)}件",
         f"満了したが廃棄・移管の起票が無い {st.get('unfiled', 0)}件",
+        f"原本封緘の照合不一致 {st.get('genpon_ihan', 0)}件"
+        f"(改変禁止トリガ {st.get('genpon_trigger', 0)}/2)",
     ]
 
 
@@ -427,6 +454,10 @@ def tenken_problems(st: dict) -> list:
         out.append(f"満了日超過のまま現用 {st['overdue']}件")
     if st.get("unfiled"):
         out.append(f"満了したが未起票 {st['unfiled']}件")
+    if st.get("genpon_ihan"):
+        out.append(f"原本封緘の照合不一致 {st['genpon_ihan']}件")
+    if st.get("genpon_trigger", 2) < 2:
+        out.append("原本保管の改変禁止トリガが欠落")
     return out
 
 

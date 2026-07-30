@@ -131,6 +131,21 @@ class TestSqlBuilders(unittest.TestCase):
         sql = ringi.transition_sql(9, "approved", "shiko")
         self.assertIn("executed_at=now()", sql)
 
+    def test_decision_seals_original(self):
+        # 原本封緘(017_genpon): 決裁の遷移だけがsealed_shaを確定する
+        for frm, action in (("pending_review", "shinsa_ok"),
+                            ("pending_decision", "kessai_ok"),
+                            ("remanded_to_reviewer", "shinsa_ok")):
+            self.assertIn("sealed_sha=encode(digest(", ringi.transition_sql(1, frm, action),
+                          f"{frm}--{action}: 封緘が無い")
+
+    def test_non_decision_never_touches_seal(self):
+        for (frm, action) in ringi.TRANSITIONS:
+            if action in ringi.DECISION_CLASS_BY_ACTION:
+                continue
+            self.assertNotIn("sealed_sha", ringi.transition_sql(1, frm, action),
+                             f"{frm}--{action}: 決裁以外が封緘に触れている")
+
     def test_log_sql(self):
         sql = ringi.log_sql(3, "shinsa:claude-sonnet-5", "sashimodoshi", "run-4",
                             memo="端末名が無い", payload=[{"action": "hosei"}])
@@ -171,6 +186,15 @@ class TestConfig(unittest.TestCase):
         self.assertTrue(s["enabled"])
         self.assertEqual(s["max_hosei_rounds"], 3)
         self.assertNotIn("unknown_key", s)
+
+    def test_bunsho_settings_independent_of_ringi(self):
+        # 廃棄・移管のスイッチはringi.enabledと独立(文書管理規程 第6章)
+        self.assertFalse(ringi.bunsho_settings({})["enabled"])
+        s = ringi.bunsho_settings({"ringi": {"enabled": True},
+                                   "bunsho": {"enabled": True, "unknown": 1}})
+        self.assertTrue(s["enabled"])
+        self.assertNotIn("unknown", s)
+        self.assertFalse(ringi.bunsho_settings({"ringi": {"enabled": True}})["enabled"])
 
     def test_example_config_parses(self):
         """config.example.json が実装の解釈と整合している"""

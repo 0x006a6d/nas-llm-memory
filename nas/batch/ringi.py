@@ -41,6 +41,19 @@ def ringi_settings(config: dict) -> dict:
     return {k: given.get(k, d) for k, d in RINGI_DEFAULTS.items()}
 
 
+# 文書管理(廃棄・移管の起票・施行)のスイッチ。facts登載の移行スイッチ(ringi.enabled)
+# とは独立に立てられる(docs/bunsho-kanri.md 第9章)
+BUNSHO_DEFAULTS = {
+    "enabled": False,   # falsyなら整理・満了検出・点検のみ(起票・施行は行わない)
+}
+
+
+def bunsho_settings(config: dict) -> dict:
+    """bunsho設定を既定値とマージして返す(未知キーは無視)。"""
+    given = config.get("bunsho") or {}
+    return {k: given.get(k, d) for k, d in BUNSHO_DEFAULTS.items()}
+
+
 # ---------------------------------------------------------------- 採番・文書番号
 
 def fiscal_year(d) -> int:
@@ -157,6 +170,10 @@ def transition_sql(draft_id: int, from_state: str, action: str) -> str:
     if action in DECISION_CLASS_BY_ACTION:
         sets.append("decided_at=now()")
         sets.append(f"decision_class={q(DECISION_CLASS_BY_ACTION[action])}")
+        # 原本封緘(017_genpon): 決裁と同じUPDATEで本文ハッシュを確定する。
+        # 式は017の遡及封緘・点検の再計算照合と同一に保つこと
+        sets.append("sealed_sha=encode(digest(doc_no || E'\\n' || title || E'\\n' || "
+                    "proposal || E'\\n' || payload::text, 'sha256'), 'hex')")
     if action == "shiko":
         sets.append("executed_at=now()")
     if from_state == "executed" and action == "sashimodoshi":

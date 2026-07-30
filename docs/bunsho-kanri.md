@@ -31,6 +31,7 @@
 | kessai-doc | drafts | 10年 | 移管 | 後閲印が条件 |
 | renraku-msg | messages | 1年 | 廃棄 | 後閲印が条件 |
 | unyou-run | batch_runs | 3年 | 廃棄 | 決裁で施行 |
+| kanri-shakuran | lending_log | 1年 | 廃棄 | 決裁で施行 |
 
 規程は `retention_rules` が正で、`enabled` が真の分類だけを整理・廃棄の対象とする (段階適用)。どのテーブルをどう束ねるかは `batch/kanribo.py` の `SOURCES` が正で、両者の一致は `tests/test_kanribo.py` が検査する。
 
@@ -65,9 +66,10 @@ facts の登載、index の改定、skill の登載、廃棄、移管は、い�
 2. **審査** — 課長モデルが、満了の事実と歴史的価値の有無を見て上申または否決する
 3. **決裁** — 部長モデルが承認または否決する (国の制度で内閣総理大臣の同意に当たる位置づけ)
 4. **施行** — 規程の施行ゲートによる:
-   - `sokujiko` — 決裁で施行する (raw_payloads・batch_runs)
-   - `kouetsu` — 書庫で人間が後閲印を押して初めて施行する (turns・auto_memory・messages)
+   - `sokujiko` — 決裁で施行する (raw_payloads・batch_runs・lending_log)
+   - `kouetsu` — 書庫で人間が後閲印を押して初めて施行する (turns・auto_memory・messages)。この施行許可の後閲印が**押印決裁**に当たり、dashboard の `approve_exec` 操作で押す。押印は `seen_at` と回議録 (actor='human', action='kouetsu') に残り、翌晩の `process_bunsho_queue()` が施行する
 5. **施行前の確認** — 当日の pg_dump が無ければ施行しない
+6. **廃棄・移管の起票と施行のスイッチ** — `config.json` の `bunsho.enabled`。facts 登載の移行スイッチ (`ringi.enabled`) とは独立で、整理・満了検出・点検は常時、起票・施行は `bunsho.enabled` が真のときだけ動く
 
 ### 廃棄しないもの
 
@@ -99,11 +101,44 @@ zcat /volume2/claude-system/archive/2026/kessai-doc_proj_2026.jsonl.gz | head -1
 
 ## 第9章 適用の手順
 
-1. `015_kanribo.sql` を適用する (管理簿と規程のテーブルができる。この時点では `enabled` が全て偽なので何も起きない)
-2. 分類を 1 つずつ有効にする。まず `shuju-raw`:
+1. `015_kanribo.sql` を適用する (管理簿と規程のテーブルができる。この時点では `enabled` が全て偽なので何も起きない)。原本保管は `017_genpon.sql`、借覧簿は `018_shakuran.sql`
+2. `config.json` に `"bunsho": {"enabled": true}` を設定する (起票・施行の解禁)
+3. 分類を 1 つずつ有効にする。まず `shuju-raw`:
    ```sql
    UPDATE retention_rules SET enabled = true WHERE category = 'shuju-raw';
    ```
-3. 翌晩の整理で管理簿にファイルが並ぶ。dashboard の「管理簿」タブで分類・件数・満了日を確認する
-4. 満了したファイルが出たら廃棄伺いが起票される。書庫で内容を確認する
-5. 実績を見てから次の分類を有効にする
+4. 翌晩の整理で管理簿にファイルが並ぶ。dashboard の「管理簿」タブで分類・件数・満了日を確認する
+5. 満了したファイルが出たら廃棄伺いが起票される。書庫で内容を確認する。`kouetsu` ゲートの分類は押印決裁 (第6章) まで行って初めて施行される
+6. 実績を見てから次の分類を有効にする。順序の目安: shuju-raw → kanri-shakuran → unyou-run → renraku-msg → shuju-memo → shuju-turns → kessai-doc
+
+## 第10章 原本保管 (改ざん防止)
+
+決裁が付いた起案文書は原本として固定する (`017_genpon.sql`)。
+
+- **封緘** — 決裁の遷移と同じ UPDATE で `sealed_sha` = sha256(doc_no + title + proposal + payload) を確定する
+- **改変禁止** — 決裁済み文書の本文・決裁情報の変更と削除、回議録 (draft_log) の書き換え・削除は DB トリガが拒否する。回議録の訂正は追記で行う
+- **唯一の例外** — 保存期間満了の廃棄・移管。施行経路だけが GUC `bunsho.disposal = on` を立てて通る
+- **検証** — 毎晩の点検が封緘ハッシュを再計算して照合し、トリガの存在を確認する。不一致は点検報告に載る
+
+## 第11章 供覧・借覧 (読む証跡)
+
+「読んだ」ことは借覧簿 `lending_log` (`018_shakuran.sql`) に記帳する。
+
+| action | channel | 意味 |
+|---|---|---|
+| etsuran | dashboard | 書庫で文書原本を開いた (同一文書は1日1行) |
+| kensaku | search | 端末からの全文検索 (1クエリ1行。query とヒット id を残す) |
+| kashidashi / henkyaku | archive | 公文書館からの取り寄せ (第12章) |
+| kouran | inbox | 端末が申し送り (messages) を受領した (ingest が配信時に記帳) |
+
+- 検索経路の記帳は reader ロールで INSERT する (SELECT 権限は無いので RETURNING を付けない)
+- 記帳の失敗で閲覧・検索・配信を失敗させない (可用性優先)。ただし公文書館の取り寄せだけは記帳が通ることを表示の条件にする (記帳の無い貸出を作らない)
+- 借覧簿自体も文書であり、保存期間基準 (kanri-shakuran, 1年, 廃棄) に載せる
+
+## 第12章 公文書館の利用請求
+
+移管済み (ikan_zumi) ファイルの中身は DB に無く `archive/` にある。
+
+- 移管の施行時に管理簿の保存場所 (`location`) を `archive/<年度>/<ファイル名>.jsonl.gz` へ更新する
+- dashboard の管理簿タブから**取り寄せ**る (閲覧のみ。DB への書き戻しはしない)。取り寄せは貸出として借覧簿に記帳される
+- 恒久的な復元が必要になったら、復元も起案文書で通す (必要になってから設計する)

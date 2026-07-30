@@ -17,7 +17,9 @@ import kanribo  # noqa: E402
 
 from test_ringi_flow import Harness  # noqa: E402
 
-SCHEMA = (ROOT / "nas" / "ingest" / "schema" / "015_kanribo.sql").read_text(encoding="utf-8")
+SCHEMA = "\n".join(
+    (ROOT / "nas" / "ingest" / "schema" / name).read_text(encoding="utf-8")
+    for name in ("015_kanribo.sql", "018_shakuran.sql"))
 
 
 def rule(days=0, years=0, measure="haiki", category="shuju-turns", gate="kouetsu"):
@@ -29,10 +31,16 @@ class TestSchemaMirror(unittest.TestCase):
     """SOURCES(コード) と retention_rules の初期値(規程) が食い違わないこと。"""
 
     def _seeded_rules(self):
-        """015 の INSERT から (分類, テーブル, 時刻列) を読む。"""
-        body = SCHEMA.split("INSERT INTO retention_rules", 1)[1]
-        return {m[0]: (m[1], m[2]) for m in
-                re.findall(r"\('([a-z-]+)',\s*'(\w+)',\s*'(\w+)'", body)}
+        """015/018 の INSERT から (分類, テーブル, 時刻列) を読む。
+
+        INSERT文単位で切り出す(連結SCHEMA全体へのfindallだと、lending_logの
+        CHECK値リスト等の無関係な括弧列を分類として拾ってしまう)。
+        """
+        rows = {}
+        for stmt in re.finditer(r"INSERT INTO retention_rules.*?;", SCHEMA, re.S):
+            rows.update({m[0]: (m[1], m[2]) for m in
+                         re.findall(r"\('([a-z-]+)',\s*'(\w+)',\s*'(\w+)'", stmt.group(0))})
+        return rows
 
     def test_categories_match(self):
         seeded = self._seeded_rules()

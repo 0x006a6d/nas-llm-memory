@@ -465,6 +465,19 @@ def kanribo_ok() -> bool:
     return _KANRIBO_OK
 
 
+def schema_gaps() -> list:
+    """schema/ の欠番検査(点検の一部)。
+
+    NASのschema/はリポジトリ(nas-llm-memory)のコピーで、過去に一部のファイルが
+    未配置のままDBだけ適用が進んでいた(012/013/016が欠けていた)。再発を検知する。
+    """
+    d = SYSTEM_DIR / "ingest" / "schema"
+    nums = sorted(int(p.name[:3]) for p in d.glob("[0-9][0-9][0-9]_*.sql"))
+    if not nums:
+        return [1]
+    return [n for n in range(1, nums[-1] + 1) if n not in nums]
+
+
 def seiri(run_id: int) -> int:
     """整理(法5条): 収集した記録を集合物にまとめ、管理簿へ記載する。
 
@@ -575,7 +588,10 @@ def execute_haiki_doc(draft_id: int, file_id: int, run_id: int):
         return 0
     if not backup_is_fresh():
         raise RuntimeError("廃棄施行: 当日のpg_dumpが無い(バックアップ後に施行する)")
-    n = int(psql(kanribo.dispose_and_record_sql(f, draft_id)) or 0)
+    # bunsho.disposal: 原本保管トリガ(017_genpon)の唯一の例外経路。決裁済み文書・
+    # 回議録の削除はこのGUCを立てたセッションだけが通れる
+    n = int(psql("SET bunsho.disposal = 'on'; "
+                 + kanribo.dispose_and_record_sql(f, draft_id)) or 0)
     advance_draft(draft_id, "approved", "shiko")
     record_draft(draft_id, "system", "shiko", run_id,
                  memo=f"{f['name']} を廃棄({n}件)")
@@ -738,7 +754,11 @@ def execute_ikan_doc(draft_id: int, file_id: int, run_id: int):
     rows = psql_json(kanribo.export_sql(f)) or []
     rel = kanribo.archive_path(f)
     n, sha = _write_archive(rel, rows)
-    deleted = int(psql(kanribo.dispose_and_record_sql(f, draft_id, state="ikan_zumi")) or 0)
+    deleted = int(psql("SET bunsho.disposal = 'on'; "
+                       + kanribo.dispose_and_record_sql(f, draft_id, state="ikan_zumi")) or 0)
+    # 管理簿の保存場所を移管先へ更新する(公文書館の利用請求=dashboardの取り寄せが参照)
+    psql(f"UPDATE record_files SET location = {q('archive/' + rel)}, "
+         f"updated_at = now() WHERE id = {int(f['id'])};")
     advance_draft(draft_id, "approved", "shiko")
     record_draft(draft_id, "system", "shiko", run_id,
                  memo=f"archive/{rel} へ移管({n}件、DBから{deleted}件外した)")
@@ -825,6 +845,9 @@ def tenken(run_id: int) -> dict:
     st = psql_json(kanribo.tenken_sql())
     st = st if isinstance(st, dict) else {}
     problems = kanribo.tenken_problems(st)
+    gaps = schema_gaps()
+    if gaps:
+        problems.append(f"schemaの欠番 {','.join(f'{n:03d}' for n in gaps)}")
     if problems:
         log(f"  点検: 不整合 {' / '.join(problems)}")
     else:
@@ -858,7 +881,11 @@ def _nendo_report(run_id: int, st: dict):
         f"うち廃棄済{rep.get('haiki', 0)}件、移管済{rep.get('ikan', 0)}件",
         f"{period}に起票した文書は{rep.get('drafts', 0)}件",
         f"未決{rep.get('miketsu', 0)}件、後閲待ち{rep.get('kouetsu_machi', 0)}件",
+        f"収受した生データは{rep.get('shunyu', 0)}件、"
+        f"借覧簿の記帳は{sum((rep.get('shakuran') or {}).values())}件",
     ]
+    if rep.get("kouetsu_days") is not None:
+        items.append(f"施行から後閲印までの日数の中央値は{rep['kouetsu_days']}日")
     did, doc_no = file_draft("tenken", "general",
                              ringi.build_title("tenken", period=period),
                              ringi.build_proposal("tenken", items,
@@ -2219,27 +2246,14 @@ def _saishinri_one(row: dict, run_id: int, model: str) -> set:
     return touched
 
 
-def process_remands(run_id: int) -> set:
-    """書庫の後閲キューを処理する(run冒頭、watermark処理とは独立)。
+def process_bunsho_queue(run_id: int):
+    """後閲印(施行許可)済みの廃棄・移管文書を施行する(docs/bunsho-kanri.md 第6章)。
 
-    - kind='skill', state='approved', seen_state='seen': 後閲印済みskillの施行(git mv+push)
-    - state='reexamine': 人間の差し戻し。決裁者が原文書+回議録+メモで再審理し、
-      是正のsaishinri文書(related_doc=原文書)を起票・施行する
-    - state='pending_decision' の未決文書: 決裁が付かなかった案件の再審理(process_miketsu)
+    対象は kind='haiki'/'ikan', state='approved', seen_state='seen'。
+    後閲印はdashboardのapprove_exec(押印決裁)が押す。ringiの後閲キュー
+    (process_remands)とは独立のスイッチ(bunsho.enabled)で動く。
     件単位で失敗を握りつぶし(WARNログのみ)、本体パイプラインへ波及させない。
-    返り値: 是正でfactsが動いたproject_key群(このrunのENRICH対象に加える)。
     """
-    m_kessai = ringi.model_for(BATCH_CONFIG, "kessai")
-    touched: set = set()
-    skills = psql_json(
-        "SELECT json_agg(json_build_object('id', id, 'name', payload->>'name') ORDER BY id) "
-        "FROM drafts WHERE kind='skill' AND state='approved' AND seen_state='seen';") or []
-    for r in skills:
-        try:
-            execute_skill_doc(int(r["id"]), str(r["name"]), run_id)
-        except Exception as exc:
-            log(f"  WARN skill施行 {r.get('name')}: {type(exc).__name__}: {exc}")
-    # 後閲印済みの廃棄文書(ゲートがkouetsuの分類)の施行
     haiki = psql_json(
         "SELECT json_agg(json_build_object('id', id, 'file_id', "
         "(payload->>'file_id')::bigint, 'name', payload->>'name') ORDER BY id) "
@@ -2258,6 +2272,29 @@ def process_remands(run_id: int) -> set:
             execute_ikan_doc(int(r["id"]), int(r["file_id"]), run_id)
         except Exception as exc:
             log(f"  WARN 移管施行 {r.get('name')}: {type(exc).__name__}: {exc}")
+
+
+def process_remands(run_id: int) -> set:
+    """書庫の後閲キューを処理する(run冒頭、watermark処理とは独立)。
+
+    - kind='skill', state='approved', seen_state='seen': 後閲印済みskillの施行(git mv+push)
+    - state='reexamine': 人間の差し戻し。決裁者が原文書+回議録+メモで再審理し、
+      是正のsaishinri文書(related_doc=原文書)を起票・施行する
+    - state='pending_decision' の未決文書: 決裁が付かなかった案件の再審理(process_miketsu)
+    後閲印済みの廃棄・移管の施行はここでは行わない(process_bunsho_queue)。
+    件単位で失敗を握りつぶし(WARNログのみ)、本体パイプラインへ波及させない。
+    返り値: 是正でfactsが動いたproject_key群(このrunのENRICH対象に加える)。
+    """
+    m_kessai = ringi.model_for(BATCH_CONFIG, "kessai")
+    touched: set = set()
+    skills = psql_json(
+        "SELECT json_agg(json_build_object('id', id, 'name', payload->>'name') ORDER BY id) "
+        "FROM drafts WHERE kind='skill' AND state='approved' AND seen_state='seen';") or []
+    for r in skills:
+        try:
+            execute_skill_doc(int(r["id"]), str(r["name"]), run_id)
+        except Exception as exc:
+            log(f"  WARN skill施行 {r.get('name')}: {type(exc).__name__}: {exc}")
     remands = psql_json(
         "SELECT json_agg(json_build_object('id', id, 'doc_no', doc_no, 'kind', kind, "
         "'project_key', project_key, 'title', title, 'proposal', proposal) ORDER BY id) "
@@ -2516,6 +2553,29 @@ def main(trial: bool = False):
         except Exception as exc:
             log(f"  WARN 整理: {type(exc).__name__}: {exc}")
 
+        # 文書管理(廃棄・移管)の起票と施行。facts登載のringiとは独立のスイッチ
+        # (docs/bunsho-kanri.md 第9章)。失敗は本体パイプラインへ波及させない
+        bs = ringi.bunsho_settings(BATCH_CONFIG)
+        bunsho_on = bool(bs["enabled"]) and drafts_ok() and kanribo_ok()
+        if bs["enabled"] and not bunsho_on:
+            log("WARN: bunsho.enabled だが drafts(012)または管理簿(015)未適用のため"
+                "廃棄・移管は行わない")
+        if bunsho_on:
+            # 後閲印(施行許可)済みの廃棄・移管の施行
+            try:
+                process_bunsho_queue(run_id)
+            except Exception as exc:
+                log(f"  WARN 書庫施行: {type(exc).__name__}: {exc}")
+            # 満了したファイルの廃棄伺い(法8条2項の同意に当たる決裁を通す)
+            try:
+                ringi_haiki(run_id)
+            except Exception as exc:
+                log(f"  WARN 廃棄伺い: {type(exc).__name__}: {exc}")
+            try:
+                ringi_ikan(run_id)
+            except Exception as exc:
+                log(f"  WARN 移管伺い: {type(exc).__name__}: {exc}")
+
         # 書庫の後閲キュー(後閲印済みskillの施行・差し戻しの再審理)と
         # skill登載伺い(scout候補の起票→審査→決裁。施行は後閲印待ちが既定)。
         # どちらも補助系なので失敗は本体パイプラインへ波及させない
@@ -2528,15 +2588,6 @@ def main(trial: bool = False):
                 ringi_skill_scan(run_id)
             except Exception as exc:
                 log(f"  WARN skill-scan: {type(exc).__name__}: {exc}")
-            # 満了したファイルの廃棄伺い(法8条2項の同意に当たる決裁を通す)
-            try:
-                ringi_haiki(run_id)
-            except Exception as exc:
-                log(f"  WARN 廃棄伺い: {type(exc).__name__}: {exc}")
-            try:
-                ringi_ikan(run_id)
-            except Exception as exc:
-                log(f"  WARN 移管伺い: {type(exc).__name__}: {exc}")
 
         projects = [r["k"] for r in psql_json(
             f"SELECT json_agg(json_build_object('k', k)) FROM ("

@@ -368,6 +368,21 @@ async def inbox(request: Request) -> dict:
             "FROM claimed ORDER BY id",
             (device, project_key),
         ).fetchall()
+    if rows:
+        # 借覧簿への記帳(供覧。docs/bunsho-kanri.md 第11章): どの端末がいつ申し送りを
+        # 受け取ったかの証跡。配信のトランザクションとは分ける(記帳の失敗が
+        # 既読化を巻き戻して二重配信にならないように)。記帳失敗は配信を妨げない
+        try:
+            with pool.connection() as conn:
+                conn.execute(
+                    "INSERT INTO lending_log "
+                    "(actor, channel, action, object_kind, object_ref) "
+                    "VALUES (%s, 'inbox', 'kouran', 'message', %s)",
+                    (device, Json({"message_ids": [r[0] for r in rows],
+                                   "project_key": project_key})),
+                )
+        except Exception:
+            pass
     return {"messages": [
         {"id": r[0], "from": r[1], "at": r[2], "body": r[3]} for r in rows
     ]}
