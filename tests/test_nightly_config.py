@@ -112,5 +112,41 @@ class TestAskClaudeModel(unittest.TestCase):
         self.assertNotIn("--model", cmd)
 
 
+class TestAskClaudeBadEnvelope(unittest.TestCase):
+    """終了コード0でも出力が壊れている場合(実際に2晩runが落ちた)。"""
+
+    def _mod(self):
+        return load_nightly({"model": "m0"})
+
+    def test_retries_once_then_succeeds(self):
+        mod = self._mod()
+        good = fake_claude_result()
+        bad = mock.Mock(returncode=0, stdout="[", stderr="")
+        with mock.patch.object(mod.subprocess, "run", side_effect=[bad, good]) as run:
+            out = mod.ask_claude("p", "verify:x")
+        self.assertEqual(out, "ok")
+        self.assertEqual(run.call_count, 2)      # 1度だけ問い直す
+
+    def test_second_failure_reports_what_came_back(self):
+        mod = self._mod()
+        bad = mock.Mock(returncode=0, stdout="[", stderr="boom")
+        with mock.patch.object(mod.subprocess, "run", side_effect=[bad, bad]):
+            with self.assertRaises(RuntimeError) as cm:
+                mod.ask_claude("p", "organize:y")
+        msg = str(cm.exception)
+        self.assertIn("claude output not json (organize:y)", msg)
+        self.assertIn("stdout[:200]='['", msg)   # 何が返ってきたかを添える
+        self.assertIn("boom", msg)
+
+    def test_nonzero_exit_is_not_retried(self):
+        """returncode!=0 は意味のある失敗なので問い直さない(コストを二重に払わない)。"""
+        mod = self._mod()
+        ng = mock.Mock(returncode=1, stdout="", stderr="usage limit")
+        with mock.patch.object(mod.subprocess, "run", side_effect=[ng]) as run:
+            with self.assertRaises(RuntimeError):
+                mod.ask_claude("p", "verify:z")
+        self.assertEqual(run.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

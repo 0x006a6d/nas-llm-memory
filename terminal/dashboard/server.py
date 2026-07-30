@@ -735,7 +735,37 @@ def spool_state():
         "sent": _count(spool / "sent"),
         "last_sent_at": _newest_mtime(spool / "sent"),
         "last_memory_scan_at": _mtime_of(spool / "last_memory_scan"),
+        "sync": _sync_state(spool),
     })
+    return out
+
+
+def _sync_state(spool):
+    """設定同期(SessionStartのgit pull)の成否。sync_worker.py が書く。
+
+    失敗を握りつぶしていたため、Mac miniで /usr/bin/git が壊れて設定同期が
+    2週間止まっていたのに気づけなかった。ここに出して見えるようにする。
+    """
+    path = spool / "sync_state.json"
+    if not path.is_file():
+        return None
+    try:
+        st = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    out = {"last_success_at": st.get("last_success_at"),
+           "last_attempt_at": st.get("last_attempt_at"),
+           "failures": int(st.get("consecutive_failures") or 0),
+           "last_error": str(st.get("last_error") or "")[:200]}
+    ok = st.get("last_success_at")
+    if ok:
+        try:
+            days = (datetime.now() - datetime.strptime(ok[:19], "%Y-%m-%dT%H:%M:%S")).days
+            out["days_since_success"] = days
+        except ValueError:
+            out["days_since_success"] = None
+    else:
+        out["days_since_success"] = None
     return out
 
 
