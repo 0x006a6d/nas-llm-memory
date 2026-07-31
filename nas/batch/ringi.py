@@ -22,7 +22,6 @@ RINGI_DEFAULTS = {
     "max_hosei_rounds": 2,       # 審査→起案者の補正往復の上限。超過は廃案
     "max_kessai_rounds": 1,      # 決裁→審査の差し戻し往復の上限。超過は廃案
     "skill_min_count": 2,        # skills-candidates を起票する検出回数の下限
-    "skill_auto_execute": False, # true: skillも決裁即施行(後閲印を施行条件にしない)
     "index_delete_ratio": 0.3,   # index改定で削除行がこの割合を超えたら上申
     "max_miketsu_nights": 3,     # 決裁不能案件を未決のまま繰り越す上限(超過で廃案)
 }
@@ -52,6 +51,19 @@ def bunsho_settings(config: dict) -> dict:
     """bunsho設定を既定値とマージして返す(未知キーは無視)。"""
     given = config.get("bunsho") or {}
     return {k: given.get(k, d) for k, d in BUNSHO_DEFAULTS.items()}
+
+
+# スキル登載(起票と施行)のスイッチ。facts登載の移行スイッチ(ringi.enabled)とは
+# 独立に立てられる。スキルの採否は人間の決裁事項(文書管理規程 第4章)
+SKILL_DEFAULTS = {
+    "enabled": False,   # falsyならスキル候補の起票・施行を行わない(ringi.enabled時は動く)
+}
+
+
+def skill_settings(config: dict) -> dict:
+    """skill設定を既定値とマージして返す(未知キーは無視)。"""
+    given = config.get("skill") or {}
+    return {k: given.get(k, d) for k, d in SKILL_DEFAULTS.items()}
 
 
 # ---------------------------------------------------------------- 採番・文書番号

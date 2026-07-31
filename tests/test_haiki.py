@@ -90,7 +90,7 @@ class HaikiHarness(Harness):
         self.mod._KANRIBO_OK = True
         self.files = files if files is not None else [rec()]
         self.rules = rules if rules is not None else [
-            {"category": "shuju-turns", "measure": "haiki", "gate": "kouetsu",
+            {"category": "shuju-turns", "measure": "haiki", "gate": "kessai",
              "retention_days": 0, "retention_years": 3}]
         self.state = state
         self.dispose_count = dispose_count
@@ -127,14 +127,16 @@ class TestRingiHaiki(unittest.TestCase):
         h.scripts["shinsa-haiki"] = [{"action": shinsa, "memo": "満了確認"}]
         h.scripts["kessai-haiki"] = [{"action": kessai, "memo": "廃棄可"}]
 
-    def test_kouetsu_gate_stops_at_approved(self):
-        """後閲印が条件の分類は、決裁で止めて実際には消さない。"""
+    def test_kessai_gate_stops_at_joshin(self):
+        """人間の決裁が条件の分類は、審査の上申で止める(LLM決裁を呼ばない)。"""
         h = HaikiHarness()
         self._scripts(h)
         self.assertEqual(h.run_haiki(), 1)
-        self.assertTrue(h.sqls_like("decision_class='bucho'"))
-        self.assertEqual(h.sqls_like("WITH d AS"), [])          # 消していない
-        self.assertEqual(h.sqls_like("executed_at=now()"), [])  # 施行していない
+        self.assertTrue(h.sqls_like("state='pending_decision'"))  # 上申で停止
+        self.assertEqual(h.sqls_like("decision_class="), [])      # 決裁していない
+        self.assertEqual(h.sqls_like("WITH d AS"), [])            # 消していない
+        self.assertEqual(h.sqls_like("executed_at=now()"), [])    # 施行していない
+        self.assertEqual([a for a in h.asks if a[0].startswith("kessai")], [])
         drafts = h.sqls_like("INSERT INTO drafts")
         self.assertIn("'haiki'", drafts[0])
         self.assertIn("廃棄一覧", drafts[0])
@@ -273,14 +275,15 @@ class TestRingiIkan(unittest.TestCase):
         self.assertEqual(h.sqls_like("DELETE FROM drafts"), [])
         self.assertTrue(h.sqls_like("state='rejected'"))
 
-    def test_kouetsu_gate_stops_before_delete(self):
+    def test_kessai_gate_stops_before_delete(self):
         h = IkanHarness(self.dir, rules=[{"category": "kessai-doc", "measure": "ikan",
-                                          "gate": "kouetsu", "retention_days": 0,
+                                          "gate": "kessai", "retention_days": 0,
                                           "retention_years": 10}])
-        h.scripts["kessai-ikan"] = [{"action": "approve", "memo": "移管可"}]
         h.run_ikan()
-        self.assertEqual(h.sqls_like("DELETE FROM drafts"), [])   # 後閲印待ち
-        self.assertTrue(h.sqls_like("decision_class='bucho'"))
+        self.assertEqual(h.sqls_like("DELETE FROM drafts"), [])   # 人間の決裁待ち
+        self.assertTrue(h.sqls_like("state='pending_decision'"))  # 上申で停止
+        self.assertEqual(h.sqls_like("decision_class="), [])      # 決裁していない
+        self.assertEqual([a for a in h.asks if a[0].startswith("kessai")], [])
 
     def test_haiki_files_are_not_migrated(self):
         h = IkanHarness(self.dir, files=[rec(measure="haiki")])

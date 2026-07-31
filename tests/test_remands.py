@@ -48,6 +48,10 @@ class RemandHarness(Harness):
         with self.ctx():
             return self.mod.process_remands(run_id=9)
 
+    def run_skill_queue(self):
+        with self.ctx():
+            return self.mod.process_skill_queue(run_id=9)
+
 
 def remand_row(doc_id=50, kind="fact"):
     return {"id": doc_id, "doc_no": "2026-0050", "kind": kind, "project_key": "proj",
@@ -62,10 +66,11 @@ HUMAN_LOGS = [
 
 class TestSkillExecuteQueue(unittest.TestCase):
     def test_seen_skill_executed(self):
+        # 人間が決裁(approved+seen)したskill文書を翌晩施行する
         h = RemandHarness()
         h.skills_queue = [{"id": 7, "name": "raster-qa"}]
         with mock.patch.object(h.mod, "execute_skill_doc") as ex:
-            h.run_remands()
+            h.run_skill_queue()
         ex.assert_called_once_with(7, "raster-qa", 9)
 
     def test_execute_failure_swallowed(self):
@@ -73,7 +78,7 @@ class TestSkillExecuteQueue(unittest.TestCase):
         h.skills_queue = [{"id": 7, "name": "a"}, {"id": 8, "name": "b"}]
         with mock.patch.object(h.mod, "execute_skill_doc",
                                side_effect=[RuntimeError("x"), None]) as ex:
-            h.run_remands()  # 例外が伝播しない
+            h.run_skill_queue()  # 例外が伝播しない
         self.assertEqual(ex.call_count, 2)
 
 

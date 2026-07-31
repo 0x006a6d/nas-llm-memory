@@ -70,24 +70,25 @@ class TestSkillScan(unittest.TestCase):
         h.scan()
         self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])
 
-    def test_happy_path_stops_at_approved(self):
+    def test_happy_path_stops_at_joshin(self):
+        """審査の上申で停止する。決裁は人間の専権(LLM決裁を呼ばない)。"""
         h = SkillHarness()
         setup_repo(h, case=self)
         h.scripts["shinsa-skill"] = [{"action": "joshin", "memo": "重複なし・手順具体的"}]
-        h.scripts["kessai-skill"] = [{"action": "approve", "memo": "登載可"}]
         h.scan()
         drafts = h.sqls_like("INSERT INTO drafts")
         self.assertEqual(len(drafts), 1)
         self.assertIn("'skill'", drafts[0])
-        self.assertIn("後閲印を条件", drafts[0])
-        # joshin→kessai_ok(bucho)で停止。施行(shiko)されない
-        self.assertTrue(h.sqls_like("decision_class='bucho'"))
+        self.assertIn("人間の決裁を条件", drafts[0])
+        # joshin(pending_decision)で停止。決裁・施行はされない
+        self.assertTrue(h.sqls_like("state='pending_decision'"))
+        self.assertEqual(h.sqls_like("decision_class="), [])
         self.assertEqual(h.sqls_like("executed_at=now()"), [])
         log_sqls = "\n".join(h.sqls_like("INSERT INTO draft_log"))
         self.assertIn("'skill-scout'", log_sqls)
         self.assertIn("重複なし・手順具体的", log_sqls)
-        # 審査=ms、決裁=mo
-        self.assertEqual([a[1] for a in h.asks], ["ms", "mo"])
+        # 審査=msのみ(決裁のLLM呼び出しは無い)
+        self.assertEqual([a[1] for a in h.asks], ["ms"])
 
     def test_shinsa_hiketsu(self):
         h = SkillHarness()
@@ -114,19 +115,8 @@ class TestSkillScan(unittest.TestCase):
         setup_repo(h2, count=5, case=self)
         h2.skill_prev = [{"state": "rejected", "count": "3"}]
         h2.scripts["shinsa-skill"] = [{"action": "joshin", "memo": "ok"}]
-        h2.scripts["kessai-skill"] = [{"action": "approve", "memo": "ok"}]
         h2.scan()
         self.assertEqual(len(h2.sqls_like("INSERT INTO drafts")), 1)
-
-    def test_auto_execute_calls_shiko(self):
-        h = SkillHarness(config={"ringi": {"skill_auto_execute": True}})
-        setup_repo(h, case=self)
-        h.scripts["shinsa-skill"] = [{"action": "joshin", "memo": "ok"}]
-        h.scripts["kessai-skill"] = [{"action": "approve", "memo": "ok"}]
-        with mock.patch.object(h.mod, "execute_skill_doc") as ex:
-            h.scan()
-        self.assertEqual(ex.call_count, 1)
-
 
 class TestExecuteSkillDoc(unittest.TestCase):
     def test_frontmatter_injected_and_git_called(self):

@@ -178,7 +178,7 @@ class TestConfig(unittest.TestCase):
         self.assertFalse(s["enabled"])
         self.assertEqual(s["max_hosei_rounds"], 2)
         self.assertEqual(s["max_kessai_rounds"], 1)
-        self.assertFalse(s["skill_auto_execute"])
+        self.assertNotIn("skill_auto_execute", s)  # 廃止(skillは人間決裁)
 
     def test_ringi_settings_override_and_unknown(self):
         s = ringi.ringi_settings({"ringi": {"enabled": True, "max_hosei_rounds": 3,
@@ -186,6 +186,12 @@ class TestConfig(unittest.TestCase):
         self.assertTrue(s["enabled"])
         self.assertEqual(s["max_hosei_rounds"], 3)
         self.assertNotIn("unknown_key", s)
+
+    def test_skill_settings_independent_of_ringi(self):
+        # スキル登載のスイッチもringi.enabledと独立(規程 第4章)
+        self.assertFalse(ringi.skill_settings({})["enabled"])
+        self.assertTrue(ringi.skill_settings({"skill": {"enabled": True}})["enabled"])
+        self.assertFalse(ringi.skill_settings({"ringi": {"enabled": True}})["enabled"])
 
     def test_bunsho_settings_independent_of_ringi(self):
         # 廃棄・移管のスイッチはringi.enabledと独立(文書管理規程 第6章)

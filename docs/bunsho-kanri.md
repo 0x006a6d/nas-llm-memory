@@ -25,11 +25,11 @@
 | 大分類 | 実体 | 保存期間 | 満了時の措置 | 施行 |
 |---|---|---|---|---|
 | shuju-raw | raw_payloads | 90日 | 廃棄 | 決裁で施行 |
-| shuju-turns | turns | 3年 | 廃棄 | 後閲印が条件 |
-| shuju-memo | auto_memory_snapshots | 1年 | 廃棄 | 後閲印が条件 |
+| shuju-turns | turns | 3年 | 廃棄 | 人間の決裁が条件 |
+| shuju-memo | auto_memory_snapshots | 1年 | 廃棄 | 決裁で施行 |
 | kiroku-fact | facts | 常用 | (満了しない) | — |
-| kessai-doc | drafts | 10年 | 移管 | 後閲印が条件 |
-| renraku-msg | messages | 1年 | 廃棄 | 後閲印が条件 |
+| kessai-doc | drafts | 10年 | 移管 | 決裁で施行 |
+| renraku-msg | messages | 1年 | 廃棄 | 決裁で施行 |
 | unyou-run | batch_runs | 3年 | 廃棄 | 決裁で施行 |
 | kanri-shakuran | lending_log | 1年 | 廃棄 | 決裁で施行 |
 
@@ -43,12 +43,14 @@
 
 ## 第4章 起案・決裁 (現用の記録に対する処分)
 
-facts の登載、index の改定、skill の登載、廃棄、移管は、いずれも起案文書として起票し、審査 (課長) → 決裁 (部長) を経て施行する。詳細は README の「起案・決裁ワークフロー」を参照。
+facts の登載、index の改定、skill の登載、廃棄、移管は、いずれも起案文書として起票し、審査 (課長) を経て決裁で施行する。詳細は README の「起案・決裁ワークフロー」を参照。
 
-- **専決** — 軽易な案件は審査で決する
-- **上申** — 既存記録の置換・撤回・矛盾の疑いは決裁へ回す
-- **未決繰越** — 決裁が付かない案件は承認も否決もせず、翌晩に再審理する
-- **後閲** — 施行後 (または施行前) に人間が確認する。差し戻すと翌晩に再審理される
+決裁には二つの区分がある。**決裁したら施行する** — 施行前の承認を後閲と呼ばない。
+
+- **LLM決裁** (senketsu/bucho) — facts 登載・index 改定・ルーチンの廃棄/移管。専決 (軽易な案件は審査で決する) と上申 (置換・撤回・矛盾の疑いは部長へ) がある
+- **人間決裁** (human) — **skill の登載**と**生ログ (turns) の廃棄**。審査 (課長) の上申で止まり、dashboard の書庫「決裁待ち」で人間が決裁 (または理由付きで否決) する。決裁と同時に封緘し、翌晩のバッチが施行する。人間が自ら決裁した文書に後閲は無い
+- **未決繰越** — LLM の決裁が付かない fact 案件は承認も否決もせず、翌晩に再審理する。人間決裁待ちの文書は期限なく待つ
+- **後閲** — **人間が関与せずに施行された文書**を人間が事後確認する。妥当なら後閲印、問題があればメモ付きで差し戻し、翌晩に再審理される
 
 ## 第5章 保存期間の満了 (法5条・8条相当)
 
@@ -66,8 +68,8 @@ facts の登載、index の改定、skill の登載、廃棄、移管は、い�
 2. **審査** — 課長モデルが、満了の事実と歴史的価値の有無を見て上申または否決する
 3. **決裁** — 部長モデルが承認または否決する (国の制度で内閣総理大臣の同意に当たる位置づけ)
 4. **施行** — 規程の施行ゲートによる:
-   - `sokujiko` — 決裁で施行する (raw_payloads・batch_runs・lending_log)
-   - `kouetsu` — 書庫で人間が後閲印を押して初めて施行する (turns・auto_memory・messages)。この施行許可の後閲印が**押印決裁**に当たり、dashboard の `approve_exec` 操作で押す。押印は `seen_at` と回議録 (actor='human', action='kouetsu') に残り、翌晩の `process_bunsho_queue()` が施行する
+   - `sokujiko` — LLM の決裁で即施行する (raw_payloads・auto_memory・messages・batch_runs・lending_log と移管)。施行後に後閲へ回る
+   - `kessai` — **人間の決裁が条件** (生ログ turns)。審査の上申で止まり、書庫「決裁待ち」で人間が決裁して初めて施行される。決裁は封緘・`seen_at`・回議録 (actor='human', action='kessai_ok') に残り、翌晩の `process_bunsho_queue()` が施行する
 5. **施行前の確認** — 当日の pg_dump が無ければ施行しない
 6. **廃棄・移管の起票と施行のスイッチ** — `config.json` の `bunsho.enabled`。facts 登載の移行スイッチ (`ringi.enabled`) とは独立で、整理・満了検出・点検は常時、起票・施行は `bunsho.enabled` が真のときだけ動く
 
@@ -102,13 +104,13 @@ zcat /volume2/claude-system/archive/2026/kessai-doc_proj_2026.jsonl.gz | head -1
 ## 第9章 適用の手順
 
 1. `015_kanribo.sql` を適用する (管理簿と規程のテーブルができる。この時点では `enabled` が全て偽なので何も起きない)。原本保管は `017_genpon.sql`、借覧簿は `018_shakuran.sql`
-2. `config.json` に `"bunsho": {"enabled": true}` を設定する (起票・施行の解禁)
+2. `config.json` に `"bunsho": {"enabled": true}` を設定する (廃棄・移管の起票・施行の解禁)。スキル登載は `"skill": {"enabled": true}` (facts 経路の `ringi.enabled` とは独立)
 3. 分類を 1 つずつ有効にする。まず `shuju-raw`:
    ```sql
    UPDATE retention_rules SET enabled = true WHERE category = 'shuju-raw';
    ```
 4. 翌晩の整理で管理簿にファイルが並ぶ。dashboard の「管理簿」タブで分類・件数・満了日を確認する
-5. 満了したファイルが出たら廃棄伺いが起票される。書庫で内容を確認する。`kouetsu` ゲートの分類は押印決裁 (第6章) まで行って初めて施行される
+5. 満了したファイルが出たら廃棄伺いが起票される。書庫で内容を確認する。`kessai` ゲートの分類は人間の決裁 (第4章) を経て初めて施行される
 6. 実績を見てから次の分類を有効にする。順序の目安: shuju-raw → kanri-shakuran → unyou-run → renraku-msg → shuju-memo → shuju-turns → kessai-doc
 
 ## 第10章 原本保管 (改ざん防止)
