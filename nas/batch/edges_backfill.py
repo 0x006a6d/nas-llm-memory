@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nightly import (acquire_lock, ask_claude, edges_ok, extract_json, log,
+from nightly import (acquire_lock, ask_claude_json, edges_ok, log,
                      pgroonga_ok, psql, psql_json, q)
 
 PAIRS_MAX = 40  # 1 keyあたり1回の実行で判定する類似ペアの上限(予算制)
@@ -78,8 +78,8 @@ def judge_key(key: str, pairs_max: int, yes: bool, run_label: str) -> tuple:
             print("中止しました")
             return (len(pairs), 0, 0)
 
-    out = ask_claude(EDGES_PROMPT.format(blocks="\n\n".join(blocks)), f"edges:{key}")
-    decisions = extract_json(out, f"edges:{key}")
+    decisions = ask_claude_json(EDGES_PROMPT.format(blocks="\n\n".join(blocks)),
+                                f"edges:{key}")
     if (not isinstance(decisions, list) or len(decisions) != len(pairs)
             or not all(isinstance(d, dict) and isinstance(d.get("related"), bool)
                        for d in decisions)):

@@ -23,8 +23,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nightly import (FETCH_LIMIT, GIT_ENV, REPO_DIR, acquire_lock, ask_claude,
-                     extract_json, log, psql, psql_json, pull_repo, q)
+from nightly import (FETCH_LIMIT, GIT_ENV, REPO_DIR, acquire_lock,
+                     ask_claude_json, log, psql, psql_json, pull_repo, q)
 import subprocess
 
 CANDIDATES_DIR = REPO_DIR / "skills-candidates"
@@ -146,9 +146,8 @@ def scout_chunk(turns: list, skills: list, candidates: dict) -> list:
     skills_text = "\n".join(f"{s['name']}: {s['description']}" for s in skills) or "(なし)"
     cands_text = "\n".join(
         f"{m['name']}: {m.get('summary', '')[:150]}" for m in candidates.values()) or "(なし)"
-    out = ask_claude(SCOUT_PROMPT.format(
+    results = ask_claude_json(SCOUT_PROMPT.format(
         skills=skills_text, candidates=cands_text, turns=turns_text), "skill-scout")
-    results = extract_json(out, "skill-scout")
     if not isinstance(results, list):
         return []
     valid = []

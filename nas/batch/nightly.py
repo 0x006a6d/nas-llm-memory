@@ -169,6 +169,23 @@ def extract_json(text: str, label: str):
     return obj
 
 
+def ask_claude_json(prompt: str, label: str, model: str | None = None):
+    """ask_claude + extract_json。応答内のJSONが壊れていたら1度だけ問い直す。
+
+    外側のSDK envelope破損はask_claudeが自分で問い直す。こちらはモデルが書いた
+    中身のJSON破損(途中で切れた配列等。run 37/41がこれで全体FAILEDになった)への
+    同じ扱い。2度目も壊れていたら諦めて例外を投げる。
+    """
+    out = ask_claude(prompt, label, model=model)
+    try:
+        return extract_json(out, label)
+    except (json.JSONDecodeError, RuntimeError) as exc:
+        log(f"  WARN claude応答内のJSONが壊れている({label}): 問い直す "
+            f"({type(exc).__name__}: {str(exc)[:120]})")
+        out = ask_claude(prompt, label, model=model)
+        return extract_json(out, label)
+
+
 # ---------------------------------------------------------------- プロンプト
 
 VERIFY_PROMPT = """あなたは開発ログから「再利用価値のある事実」を抽出する係です。
@@ -405,12 +422,11 @@ def verify_project(project: str, turns: list, memories: list, run_id: int,
         f"({m['file_path']})\n{m['content'][:TURN_SNIPPET_CHARS]}" for m in memories
     ) or "(なし)"
 
-    out = ask_claude(
+    candidates = ask_claude_json(
         VERIFY_PROMPT.format(project=project, turns=turns_text, memories=mem_text),
         f"{label_prefix}:{project}",
         model=model,
     )
-    candidates = extract_json(out, f"{label_prefix}:{project}")
     valid = []
     for c in candidates:
         if not isinstance(c, dict) or not c.get("content"):
@@ -979,12 +995,11 @@ def _judge_with_shortlist(key: str, cands: list, rule: str, default: dict,
             blocks.append(btext)
             size += len(btext) + 2
             pos += 1
-        out = ask_claude(
+        sub = ask_claude_json(
             prompt.format(rule=rule, blocks="\n\n".join(blocks)),
             f"{label}:{key}",
             model=model,
         )
-        sub = extract_json(out, f"{label}:{key}")
         prompts += 1
         if not isinstance(sub, list) or len(sub) != len(batch):
             # 形式不一致時の保守側: 通常は全insert(取り逃さない)。
@@ -1011,11 +1026,10 @@ def _judge_flat(key: str, cands: list, rule: str, default: dict):
                 "flat existing=0")
     ex_text = "\n".join(f"[{e['id']}] {e['content']}" for e in existing)[:40_000]
     cand_text = "\n".join(f"[{i}] {c['content']}" for i, c in enumerate(cands))
-    out = ask_claude(
+    decisions = ask_claude_json(
         ORGANIZE_PROMPT_FLAT.format(rule=rule, existing=ex_text, candidates=cand_text),
         f"organize:{key}",
     )
-    decisions = extract_json(out, f"organize:{key}")
     if not isinstance(decisions, list) or len(decisions) != len(cands):
         decisions = [dict(default) for _ in cands]
     return decisions, allowed, f"flat existing={len(existing)}"
@@ -1261,12 +1275,11 @@ def align_trial(project: str, results: dict) -> tuple[list, dict]:
         if not results[k]:
             lines.append("(候補なし)")
         blocks.append("\n".join(lines))
-    out = ask_claude(
+    clusters = ask_claude_json(
         TRIAL_ALIGN_PROMPT.format(blocks="\n\n".join(blocks)),
         f"trial-align:{project}",
         model=ringi.model_for(BATCH_CONFIG, "shinsa"),
     )
-    clusters = extract_json(out, f"trial-align:{project}")
     if not isinstance(clusters, list):
         raise RuntimeError(f"trial-align: 配列でない応答 ({project})")
     # ラベル(A)→モデルキーへ戻し、範囲外・重複indexを落とす
@@ -2597,40 +2610,48 @@ def main(trial: bool = False):
         )]
         log(f"run {run_id}: turns {wm_turn}->{max_turn}, snapshots {wm_snap}->{max_snap}, projects: {projects}")
 
+        failed_projects = []
         for project in projects:
-            turns = fetch_turns(project, wm_turn, max_turn)
-            memories = psql_json(
-                f"SELECT json_agg(json_build_object('file_path', file_path, 'content', content) ORDER BY id) "
-                f"FROM auto_memory_snapshots WHERE project_key={q(project)} "
-                f"AND id > {wm_snap} AND id <= {max_snap};"
-            )
-            if not turns and not memories:
-                continue
-            chunks = make_chunks(turns, memories)
-            candidates = []
-            for turn_chunk, mem_chunk in chunks:
-                # ringi有効時の起案(verify)は専決規程のkianモデルが担う
-                candidates += verify_project(project, turn_chunk, mem_chunk, run_id,
-                                             model=kian_model)
-            log(f"  {project}: {len(turns)} turns, {len(memories)} memories -> {len(candidates)} candidates")
-            if trial_on:
-                # 試行の失敗は本番runに波及させない(記録のみで握りつぶす)
-                try:
-                    trial_project(project, chunks, candidates, run_id,
-                                  base_model=kian_model, deadline=trial_deadline)
-                except Exception as exc:
-                    log(f"  WARN trial {project}: {type(exc).__name__}: {exc}")
-            if not candidates:
-                continue
-            if ringi_on:
-                ins, drp = ringi_facts_project(project, candidates, run_id)
-            else:
-                ins, drp = organize_and_insert(project, candidates, run_id)
-            total_inserted += ins
-            total_dropped += drp
-            touched_keys.add(project)
-            if any(c["scope"] == "general" for c in candidates):
-                touched_keys.add("general")
+            # 1プロジェクトの失敗(claude不調・壊れた応答等)でrun全体を道連れに
+            # しない。成功した分のfactsと配布は活かし、失敗した分はwatermarkを
+            # 進めないことで翌晩やり直す(下のpartial記録)
+            try:
+                turns = fetch_turns(project, wm_turn, max_turn)
+                memories = psql_json(
+                    f"SELECT json_agg(json_build_object('file_path', file_path, 'content', content) ORDER BY id) "
+                    f"FROM auto_memory_snapshots WHERE project_key={q(project)} "
+                    f"AND id > {wm_snap} AND id <= {max_snap};"
+                )
+                if not turns and not memories:
+                    continue
+                chunks = make_chunks(turns, memories)
+                candidates = []
+                for turn_chunk, mem_chunk in chunks:
+                    # ringi有効時の起案(verify)は専決規程のkianモデルが担う
+                    candidates += verify_project(project, turn_chunk, mem_chunk, run_id,
+                                                 model=kian_model)
+                log(f"  {project}: {len(turns)} turns, {len(memories)} memories -> {len(candidates)} candidates")
+                if trial_on:
+                    # 試行の失敗は本番runに波及させない(記録のみで握りつぶす)
+                    try:
+                        trial_project(project, chunks, candidates, run_id,
+                                      base_model=kian_model, deadline=trial_deadline)
+                    except Exception as exc:
+                        log(f"  WARN trial {project}: {type(exc).__name__}: {exc}")
+                if not candidates:
+                    continue
+                if ringi_on:
+                    ins, drp = ringi_facts_project(project, candidates, run_id)
+                else:
+                    ins, drp = organize_and_insert(project, candidates, run_id)
+                total_inserted += ins
+                total_dropped += drp
+                touched_keys.add(project)
+                if any(c["scope"] == "general" for c in candidates):
+                    touched_keys.add("general")
+            except Exception as exc:
+                failed_projects.append(project)
+                log(f"  WARN project {project}: {type(exc).__name__}: {exc}")
 
         # ENRICH(事実が動いたproject_keyのみ再生成) + 配布
         index_lines = publish(touched_keys, run_id, "nightly", ringi_on=ringi_on)
@@ -2650,6 +2671,22 @@ def main(trial: bool = False):
                 f" GROUP BY 1 ORDER BY 1) t;")
         except Exception:
             agents = None  # agent列が未適用(schema 006前)でも本筋は続行
+        if failed_projects:
+            # 部分成功: 成功した分のfactsと配布は残すが、watermarkは進めない
+            # (翌晩、同じ窓を全プロジェクトでやり直す。再処理の候補は既存facts
+            # との照合(ORGANIZE)が重複として落とす)。statusは'success'にしない:
+            # watermark集計から自然に外れ、dashboardの停止検知も黙らせない
+            notes = (f"inserted={total_inserted} "
+                     f"projects={len(projects) - len(failed_projects)}/{len(projects)} "
+                     f"failed={','.join(failed_projects)[:200]}"
+                     + (f" agents=({agents})" if agents else ""))
+            psql(f"UPDATE batch_runs SET finished_at=now(), status='partial', "
+                 f"turns_processed={turns_processed}, candidates_dropped={total_dropped}, "
+                 f"index_lines={index_lines}, notes={q(notes)} "
+                 f"WHERE id={run_id};")
+            log(f"run {run_id}: partial (facts+{total_inserted}, dropped={total_dropped}, "
+                f"failed: {', '.join(failed_projects)})")
+            return
         notes = (f"inserted={total_inserted} projects={len(projects)}"
                  + (f" agents=({agents})" if agents else ""))
         psql(f"UPDATE batch_runs SET finished_at=now(), status='success', "
