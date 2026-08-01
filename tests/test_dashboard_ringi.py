@@ -54,6 +54,11 @@ class TestShelfOpTransitions(unittest.TestCase):
         to = ringi.next_state("executed", "sashimodoshi")
         self.assertIn(f"when state='executed' then '{to}'", self._remand_sql())
 
+    def test_pending_decision_goes_to_reviewer(self):
+        # 決裁待ちからの人間の差戻は審査へ(翌晩、審査が補正・再上申または廃案)
+        to = ringi.next_state("pending_decision", "sashimodoshi")
+        self.assertIn(f"when state='pending_decision' then '{to}'", self._remand_sql())
+
     def test_approved_goes_to_rejected(self):
         to = ringi.next_state("approved", "sashimodoshi")
         self.assertIn(f"when state='approved' then '{to}'", self._remand_sql())
@@ -77,6 +82,7 @@ class TestShelfFilters(unittest.TestCase):
         {"id": 3, "kind": "skill", "state": "approved", "seen_state": "pending"},
         {"id": 4, "kind": "fact", "state": "pending_decision", "seen_state": "pending"},
         {"id": 5, "kind": "fact", "state": "reexamine", "seen_state": "remanded"},
+        {"id": 6, "kind": "skill", "state": "remanded_to_reviewer", "seen_state": "pending"},
     ]
 
     def _demo_ids(self, filt):
@@ -101,9 +107,11 @@ class TestShelfFilters(unittest.TestCase):
         self.assertIn("state in ('executed','rejected','approved')",
                       self._sql_cond("pending"))
 
-    def test_remanded_includes_reexamine(self):
-        self.assertEqual(self._demo_ids("remanded"), [5])
-        self.assertIn("state = 'reexamine'", self._sql_cond("remanded"))
+    def test_remanded_includes_reexamine_and_reviewer(self):
+        # 決裁待ちからの人間差戻(remanded_to_reviewer)も「差し戻し・再審理中」に出す
+        self.assertEqual(self._demo_ids("remanded"), [5, 6])
+        self.assertIn("state in ('reexamine','remanded_to_reviewer','remanded_to_drafter')",
+                      self._sql_cond("remanded"))
 
 
 class TestKanriboFilters(unittest.TestCase):
@@ -296,12 +304,13 @@ class TestShelfReplay(unittest.TestCase):
         out = self._demo()
         self.assertEqual([r["run_id"] for r in out["runs"]], [11, 10])
         self.assertEqual(out["run_id"], 11)
-        self.assertEqual([r["n"] for r in out["runs"]], [3, 10])
+        # run-10 は9件(skill文書は上申=人間の決裁待ちで停止し、決裁の記帳が無い)
+        self.assertEqual([r["n"] for r in out["runs"]], [3, 9])
 
     def test_demo_events_are_log_ordered_and_stamped(self):
         out = self._demo(10)
         self.assertEqual(out["run_id"], 10)
-        self.assertEqual([e["id"] for e in out["events"]], [1, 2, 3, 4, 6, 7, 8, 9, 10, 11])
+        self.assertEqual([e["id"] for e in out["events"]], [1, 2, 3, 4, 6, 7, 8, 9, 10])
         self.assertTrue(all(e.get("doc_no_disp") for e in out["events"]))
         self.assertEqual(out["events"][0]["doc_no_disp"], "記憶第1号(令和8年度)")
         self.assertEqual(out["events"][0]["draft_id"], 1)

@@ -38,8 +38,11 @@ PORT = 8810
 DEMO = False  # --demo: NAS へ接続せず demo/ のダミーデータで動く(公開リポ向け)
 
 SSH_TARGET = "nas"
+# PGTZ=Asia/Tokyo: 全クエリのtimestamptz出力をJSTで返す(DB格納はUTCのまま)。
+# 表示時刻の正はこの1箇所 — 個別クエリでの at time zone 変換を増やさない
 PSQL = ("cd /volume2/claude-system && "
-        "docker compose exec -T db psql -U claude -d claude_memory -t -A -f -")
+        "docker compose exec -T -e PGTZ=Asia/Tokyo db psql "
+        "-U claude -d claude_memory -t -A -f -")
 
 
 class ConflictError(RuntimeError):
@@ -1039,6 +1042,38 @@ def fact_op(op, project, content, fact_id):
     return run_sql(sql)
 
 
+# ---------------------------------------------------------------- 収受簿(raw_payloads)
+
+def shuju_list(device="", kind=""):
+    """収受簿: raw_payloads の受付台帳(収受番号=id、受付印=received_at)。
+
+    処理状況は parsed_at(受理済)/parse_error(要確認)/どちらも無し(未処理)で表す。
+    台帳は直近100件、端末別集計は全期間。時刻は接続のPGTZでJSTになる。
+    """
+    if DEMO:
+        data = load_json(DEMO_DIR / "shuju.json", {"rows": [], "devices": []})
+        rows = data.get("rows", [])
+        if device:
+            rows = [r for r in rows if r.get("device") == device]
+        if kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        return {"rows": rows, "devices": data.get("devices", [])}
+    cond = "true"
+    if device:
+        cond += f" and device = {dollar_quote(device)}"
+    if kind:
+        cond += f" and kind = {dollar_quote(kind)}"
+    rows = sql_json(
+        "select id, device, kind, received_at, parsed_at, parse_error, "
+        "octet_length(payload::text) bytes from raw_payloads "
+        f"where {cond} order by id desc limit 100")
+    devices = sql_json(
+        "select device, count(*) n, max(received_at) last_at, "
+        "count(*) filter (where parse_error is not null) errs "
+        "from raw_payloads group by device order by device")
+    return {"rows": rows, "devices": devices}
+
+
 # ---------------------------------------------------------------- 書庫(起案・決裁文書)
 
 def _doc_no_disp(fy, seq):
@@ -1081,7 +1116,8 @@ def shelf_list(filt, kind, state=None):
                     and r.get("state") in ("executed", "rejected", "approved")]
         elif filt == "remanded":
             rows = [r for r in rows if r.get("seen_state") == "remanded"
-                    or r.get("state") == "reexamine"]
+                    or r.get("state") in ("reexamine", "remanded_to_reviewer",
+                                          "remanded_to_drafter")]
         elif filt == "miketsu":
             rows = [r for r in rows if r.get("state") == "pending_decision"]
         if kind:
@@ -1094,7 +1130,8 @@ def shelf_list(filt, kind, state=None):
         # 後閲対象 = 完結して人間がまだ見ていない文書(施行済み・廃案・後閲待ちskill)
         cond = "seen_state = 'pending' and state in ('executed','rejected','approved')"
     elif filt == "remanded":
-        cond = "seen_state = 'remanded' or state = 'reexamine'"
+        cond = ("seen_state = 'remanded' or state in "
+                "('reexamine','remanded_to_reviewer','remanded_to_drafter')")
     elif filt == "miketsu":
         # 未決 = 決裁が付かず翌晩へ繰り越し中の文書(承認でも廃案でもない)
         cond = "state = 'pending_decision'"
@@ -1135,6 +1172,18 @@ def shelf_doc(did):
         f"where related_doc = {did}"
         + (f" or id = {int(rel)}" if rel else "") + " "
         "order by id")
+    # 借覧簿への記帳(閲覧。文書管理規程 第11章)。同一文書は1日1行に丸める。
+    # 記帳失敗で閲覧を失敗させない(可用性優先)
+    try:
+        run_sql(
+            "insert into lending_log (actor, channel, action, object_kind, object_ref) "
+            "select 'human', 'dashboard', 'etsuran', 'draft', "
+            f"jsonb_build_object('draft_id', {did}) "
+            "where not exists (select 1 from lending_log "
+            "where channel='dashboard' and action='etsuran' "
+            f"and (object_ref->>'draft_id')::bigint = {did} and at >= current_date);")
+    except Exception:  # noqa: BLE001 — 017未適用環境
+        pass
     return doc
 
 
@@ -1192,10 +1241,20 @@ def shelf_replay(run=None):
 
 
 def shelf_op(op, draft_id, memo):
-    """後閲操作。kouetsu=後閲印 / remand=メモ付き差し戻し / approve_skill=skill施行許可。
+    """書庫の人間操作。kessai=決裁 / hiketsu=否決 / kouetsu=後閲印 / remand=差し戻し。
 
-    差し戻しの意味論: executed文書→翌晩、決裁者が再審理(reexamine)。
-    approved(後閲待ちskill)→廃案。remandはメモ必須(前の担当者への指示)。
+    kessai は人間の決裁(文書管理規程 第4章): 上申で止まっている(pending_decision)
+    skill/haiki/ikan 文書を承認する。決裁と同時に封緘(sealed_sha)し、自ら決裁した
+    文書に後閲は不要なのでseen済みにする。施行は翌晩のnightly
+    (skill=skills/へ登載、haiki=廃棄、ikan=移管)。hiketsu は同じ文書の否決(理由必須)。
+    kouetsu は人間が関与せずに施行された文書の事後確認(後閲印)。
+    差し戻し(remand)の意味論(メモ必須=前の担当者への指示):
+    - pending_decision(決裁待ち)→審査へ差し戻し(remanded_to_reviewer)。
+      翌晩、審査(課長)がメモを踏まえて補正・再上申または廃案にする。
+      決裁者による差し戻しなので、審査の専決(shinsa_ok)で人間を飛ばすことはしない
+    - executed(施行済)→翌晩、決裁者が再審理(reexamine)
+    - approved(施行前)→廃案
+    approve_exec/approve_skill は旧経路(LLM決裁済み文書への施行許可)の互換。
     """
     did = int(draft_id)
     if DEMO:
@@ -1210,27 +1269,53 @@ def shelf_op(op, draft_id, memo):
     elif op == "remand":
         if not (memo or "").strip():
             raise ValueError("差し戻しにはメモ(前の担当者への指示)が必要です")
-        sql = ("update drafts set seen_state='remanded', seen_at=now(), "
-               "state = case when state='executed' then 'reexamine' "
-               "when state='approved' then 'rejected' else state end "
-               f"where id={did} and seen_state='pending' "
-               "and state in ('executed','approved') returning id;")
+        sql = ("update drafts set "
+               "state = case when state='pending_decision' then 'remanded_to_reviewer' "
+               "when state='executed' then 'reexamine' "
+               "when state='approved' then 'rejected' else state end, "
+               "seen_state = case when state='pending_decision' then seen_state "
+               "else 'remanded' end, "
+               "seen_at = case when state='pending_decision' then seen_at else now() end "
+               f"where id={did} and ((state='pending_decision' "
+               "and kind in ('skill','haiki','ikan')) "
+               "or (seen_state='pending' and state in ('executed','approved'))) "
+               "returning id;")
         action, log_memo = "sashimodoshi", memo
-    elif op == "approve_skill":
-        # 後閲印=施行許可。翌晩のnightlyがskills/へ移して施行する
+    elif op == "kessai":
+        # 決裁と封緘を1文で行う(封緘式は017_genpon/ringi.transition_sqlと同一に保つ)
+        sql = ("update drafts set state='approved', decided_at=now(), "
+               "decision_class='human', "
+               "sealed_sha=encode(digest(doc_no || E'\\n' || title || E'\\n' || "
+               "proposal || E'\\n' || payload::text, 'sha256'), 'hex'), "
+               "seen_state='seen', seen_at=now() "
+               f"where id={did} and state='pending_decision' "
+               "and kind in ('skill','haiki','ikan') returning id;")
+        action, log_memo = "kessai_ok", memo or "決裁"
+    elif op == "hiketsu":
+        if not (memo or "").strip():
+            raise ValueError("否決には理由(メモ)が必要です")
+        sql = ("update drafts set state='rejected', seen_state='seen', seen_at=now() "
+               f"where id={did} and state='pending_decision' "
+               "and kind in ('skill','haiki','ikan') returning id;")
+        action, log_memo = "hiketsu", memo
+    elif op in ("approve_exec", "approve_skill"):
+        # 後閲印=施行許可。翌晩のnightlyが施行する(skill=登載、haiki=廃棄、ikan=移管)
         sql = ("update drafts set seen_state='seen', seen_at=now() "
                f"where id={did} and seen_state='pending' and state='approved' "
-               "and kind='skill' returning id;")
+               "and kind in ('skill','haiki','ikan') returning id;")
         action, log_memo = "kouetsu", memo or "後閲印(施行許可)"
     else:
         raise ValueError(f"unknown op: {op}")
     # 状態更新と回議録の記帳を1文(CTE)で行う: 更新だけ通って記帳が落ちると
     # 後閲印や差し戻しの痕跡が残らないため
-    if not run_sql(f"with upd as ({sql.rstrip('; ')}) "
-                   "insert into draft_log (draft_id, actor, action, memo, created_by) "
-                   f"select id, 'human', {dollar_quote(action)}, "
-                   f"{dollar_quote(log_memo) if log_memo else 'null'}, {by} from upd "
-                   "returning draft_id;"):
+    out = run_sql(f"with upd as ({sql.rstrip('; ')}) "
+                  "insert into draft_log (draft_id, actor, action, memo, created_by) "
+                  f"select id, 'human', {dollar_quote(action)}, "
+                  f"{dollar_quote(log_memo) if log_memo else 'null'}, {by} from upd "
+                  "returning draft_id;")
+    # psqlは-tでもINSERTのコマンドタグ('INSERT 0 0')をstdoutに出すため、出力の
+    # 有無では0行更新(状態の食い違い)を検出できない。RETURNINGのdraft_id行で判定する
+    if not any(ln.strip().isdigit() for ln in out.splitlines()):
         raise ConflictError("文書の状態が変わっています。再読込してください")
     return {"ok": True}
 
@@ -1296,6 +1381,51 @@ def kanribo_rules():
     return sql_json(
         "select category, source_table, ts_column, retention_days, retention_years, "
         "measure, gate, enabled, note from retention_rules order by category")
+
+
+def archive_fetch(file_id):
+    """公文書館の利用請求: 移管済みファイルをarchive領域から取り寄せて表示する。
+
+    DBへの書き戻しはしない(閲覧のみ)。取り寄せは貸出であり、借覧簿への記帳が
+    先に通ることを表示の条件にする(記帳の無い貸出を作らない。文書管理規程 第12章)。
+    保存場所は移管の施行時に管理簿へ書かれた archive/ パスを使う。
+    """
+    fid = int(file_id)
+    if DEMO:
+        raise RuntimeError("demo モードでは取り寄せできません")
+    rows = sql_json(
+        "select id, category, project_key, name, period, fiscal_year, "
+        "location, state, n_rows from record_files "
+        f"where id = {fid} and state = 'ikan_zumi'")
+    if not rows:
+        raise ValueError(f"移管済みファイルがありません: id={fid}")
+    f = dict(rows[0])
+    m = re.fullmatch(r"archive/([0-9]{4}/[A-Za-z0-9._-]+\.jsonl\.gz)",
+                     str(f.get("location") or ""))
+    if not m:
+        raise ValueError(f"保存場所がarchiveパスではありません: {f.get('location')}")
+    rel = m.group(1)
+    run_sql(
+        "insert into lending_log (actor, channel, action, object_kind, object_ref) values "
+        "('human', 'archive', 'kashidashi', 'record_file', "
+        f"jsonb_build_object('file_id', {fid}, 'path', {dollar_quote(rel)}));")
+    # プレビューはリモート側で行数を絞ってから転送する(移管ファイルは将来大きくなる)。
+    # 総行数は管理簿のn_rowsが正
+    proc = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", SSH_TARGET,
+         f"gunzip -c /volume2/claude-system/archive/{rel} | head -n 201"],
+        capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(f"取り寄せ失敗: {proc.stderr[-500:]}")
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    truncated = len(lines) > 200
+    out = []
+    for ln in lines[:200]:
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            out.append({"raw": ln[:2000]})
+    return {"file": f, "n": f.get("n_rows"), "rows": out, "truncated": truncated}
 
 
 def kanribo_counts():
@@ -1365,7 +1495,7 @@ BATCH_CONFIG_REMOTE = "/volume2/claude-system/batch/config.json"
 CONFIG_ROLES = ("kian", "shinsa", "kessai", "enrich")
 CONFIG_RINGI_TYPES = {
     "enabled": bool, "trial": bool, "max_hosei_rounds": int, "max_kessai_rounds": int,
-    "skill_min_count": int, "skill_auto_execute": bool, "index_delete_ratio": (int, float),
+    "skill_min_count": int, "index_delete_ratio": (int, float),
     "trial_models": list, "trial_budget_min": int,
 }
 # 数値設定の許容範囲(規程外の値を書いて翌晩のバッチを壊さない)
@@ -1680,6 +1810,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(list_flags())
             elif url.path == "/api/messages":
                 self.send_json(list_messages())
+            elif url.path == "/api/shuju":
+                self.send_json(shuju_list(q.get("device", [""])[0],
+                                          q.get("kind", [""])[0]))
             elif url.path == "/api/shelf":
                 self.send_json(shelf_list(q.get("filter", ["pending"])[0],
                                           q.get("kind", [""])[0],
@@ -1694,6 +1827,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"list": kanribo_list(q.get("filter", ["all"])[0],
                                                      q.get("category", [""])[0]),
                                 "rules": kanribo_rules()})
+            elif url.path == "/api/archive_fetch":
+                self.send_json(archive_fetch(q["id"][0]))
             elif url.path == "/api/usage":
                 self.send_json(usage_snapshot(q.get("hours", ["168"])[0]))
             else:

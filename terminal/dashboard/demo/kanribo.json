@@ -18,7 +18,7 @@
    "retention_days": 0,
    "retention_years": 3,
    "measure": "haiki",
-   "gate": "kouetsu",
+   "gate": "kessai",
    "enabled": false,
    "note": "生ログ。現用factsの根拠になっている行は廃棄対象から外す"
   },
@@ -29,7 +29,7 @@
    "retention_days": 0,
    "retention_years": 10,
    "measure": "ikan",
-   "gate": "kouetsu",
+   "gate": "sokujiko",
    "enabled": false,
    "note": "起案・決裁文書。10年で移管(廃棄しない)"
   },
@@ -40,7 +40,7 @@
    "retention_days": 0,
    "retention_years": 0,
    "measure": "jouyou",
-   "gate": "kouetsu",
+   "gate": "kessai",
    "enabled": false,
    "note": "事実層。常用(満了しない)"
   }
@@ -102,7 +102,7 @@
    "id_to": 23853,
    "retention_days": 0,
    "retention_years": 3,
-   "gate": "kouetsu",
+   "gate": "kessai",
    "retention_disp": "3年",
    "days_left": 1341
   },
@@ -122,7 +122,7 @@
    "id_to": 4,
    "retention_days": 0,
    "retention_years": 10,
-   "gate": "kouetsu",
+   "gate": "sokujiko",
    "retention_disp": "10年",
    "days_left": 3899
   },
@@ -142,7 +142,7 @@
    "id_to": 329,
    "retention_days": 0,
    "retention_years": 0,
-   "gate": "kouetsu",
+   "gate": "kessai",
    "retention_disp": "常用",
    "days_left": null
   }

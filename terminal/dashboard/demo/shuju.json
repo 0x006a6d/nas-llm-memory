@@ -1,0 +1,16 @@
+{
+  "rows": [
+    {"id": 412, "device": "MacBook-Pro", "kind": "transcript", "received_at": "2026-07-31T12:17:04", "parsed_at": "2026-07-31T12:17:05", "parse_error": null, "bytes": 184320},
+    {"id": 411, "device": "NucBoxEVO-X2", "kind": "auto_memory", "received_at": "2026-07-31T11:17:02", "parsed_at": "2026-07-31T11:17:02", "parse_error": null, "bytes": 5120},
+    {"id": 410, "device": "NucBoxEVO-X2", "kind": "transcript", "received_at": "2026-07-31T11:17:01", "parsed_at": "2026-07-31T11:17:03", "parse_error": null, "bytes": 96256},
+    {"id": 409, "device": "Mac-mini", "kind": "transcript", "received_at": "2026-07-31T10:17:09", "parsed_at": null, "parse_error": "payload.turns[3]: message_uuid missing", "bytes": 20480},
+    {"id": 408, "device": "NAS", "kind": "transcript", "received_at": "2026-07-31T09:17:00", "parsed_at": "2026-07-31T09:17:01", "parse_error": null, "bytes": 40960},
+    {"id": 407, "device": "MacBook-Pro", "kind": "transcript", "received_at": "2026-07-30T23:17:05", "parsed_at": "2026-07-30T23:17:06", "parse_error": null, "bytes": 143360}
+  ],
+  "devices": [
+    {"device": "Mac-mini", "n": 41, "last_at": "2026-07-31T10:17:09", "errs": 1},
+    {"device": "MacBook-Pro", "n": 188, "last_at": "2026-07-31T12:17:04", "errs": 0},
+    {"device": "NAS", "n": 36, "last_at": "2026-07-31T09:17:00", "errs": 0},
+    {"device": "NucBoxEVO-X2", "n": 147, "last_at": "2026-07-31T11:17:02", "errs": 0}
+  ]
+}
