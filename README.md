@@ -148,3 +148,7 @@ opencode (kimi 等を動かす CLI) のセッションも同じ経路に載る�
 - 端末: git、python3 (3.9+)、Claude Code。hooks は POSIX 前提 (Windows は WSL2 で使う)
 - NAS: Docker が動く Linux NAS。実環境は UGREEN (UGOS) だが依存はない。NAS 上でも Claude Code CLI を認証済みにしておく (夜間バッチが使う)
 - 秘密情報 (API トークン、DB パスワード) はこのリポジトリには含まれない。各自が secrets ファイルとして配置する
+
+## ライセンス
+
+[WTFPL](LICENSE)。
