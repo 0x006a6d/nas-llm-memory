@@ -5,6 +5,14 @@
 修正のみは PATCH。dashboard など claude-config 側の変更もここに書く(一冊主義)。
 v0.0.1 以前の経緯は git log と docs/ を参照。
 
+## [v0.0.3] - 2026-08-05
+
+### バッチ失敗時の原因表示
+
+claude CLI が非ゼロ終了したとき、stderr が空でも stdout の envelope から
+result 本文(使用量上限の通知等)と subtype を例外メッセージに含めるようにした。
+batch_runs の notes と dashboard の注意欄に失敗原因がそのまま残る。
+
 ## [v0.0.2] - 2026-08-02
 
 ### ライセンス
