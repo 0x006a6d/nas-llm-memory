@@ -130,12 +130,21 @@ def ask_claude(prompt: str, label: str, model: str | None = None) -> str:
             env={**os.environ, "CLAUDE_SPOOL_SKIP": "1"},  # バッチ自身のセッションは収集しない
         )
         if r.returncode != 0:
-            # 失敗応答にも消費分のusage/costが入る(SDKは失敗時点までを計上する)
+            # 失敗応答にも消費分のusage/costが入る(SDKは失敗時点までを計上する)。
+            # エラー本文はstderrでなくenvelopeのresultに入ることがある(使用量上限等)
+            detail = r.stderr.strip()[:500]
             try:
-                _log_usage(label, json.loads(r.stdout))
+                env = json.loads(r.stdout)
+                _log_usage(label, env)
+                subtype = env.get("subtype")
+                body = str(env.get("result") or "").strip()[:300]
+                if not body and subtype:
+                    body = f"subtype={subtype}"
+                detail = " ".join(p for p in (detail, body) if p) \
+                    or f"subtype={subtype}"
             except Exception:
                 pass
-            raise RuntimeError(f"claude failed ({label}): {r.stderr.strip()[:500]}")
+            raise RuntimeError(f"claude failed ({label}): {detail}")
         try:
             envelope = json.loads(r.stdout)
             break
@@ -1805,7 +1814,7 @@ KESSAI_INDEX_PROMPT = """あなたはindex改定の決裁者(部長)です。プ
 出力は次のJSONのみ(説明文なし):
 {{"action": "approve"|"hiketsu", "memo": "理由(1文)"}}
 - approve: 改定を承認する(削除は妥当)
-- hiketsu: 改定を見送る(現行indexを維持。書庫の後閲で差し戻し・再審理できる)
+- hiketsu: 改定を見送る(現行indexを維持。決裁・後閲タブの後閲で差し戻し・再審理できる)
 
 ## 現行→改定案の差分(unified diff)
 {diff}
@@ -2009,7 +2018,7 @@ def _file_skill_doc(name: str, meta: dict, skill_md: str, run_id: int,
     """1候補の登載伺い: 起票→審査(意見付き上申)→人間の決裁待ちで停止。
 
     スキルの採否は人間の決裁事項(文書管理規程 第4章)。LLMは審査意見を付けて
-    上申するまでで、決裁はdashboard(書庫)の人間が行う。決裁されたら翌晩、
+    上申するまでで、決裁はdashboard(決裁・後閲タブ)の人間が行う。決裁されたら翌晩、
     process_skill_queue が施行(skills/へ登載・全端末配布)する。
     """
     count = int(meta.get("count") or 0)
