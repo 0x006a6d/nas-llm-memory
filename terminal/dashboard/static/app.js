@@ -17,6 +17,7 @@ const TABS = {
   overview: "文書事務概況",
   collect: "収受簿",
   facts: "現用文書",
+  kessai: "決裁・後閲",
   shelf: "書庫",
   kanribo: "管理簿",
   skills: "スキル",
@@ -25,6 +26,7 @@ const TABS = {
   routing: "配付先",
   messages: "事務引継",
   usage: "予算執行",
+  teiso: "逓送",
   kanri: "監理",
 };
 
@@ -148,9 +150,9 @@ function warnings() {
   }
   const sc = S.skill_candidates || [];
   if (sc.length) out.push({ kind: "info", tag: "スキル候補",
-    text: `未採用のスキル候補が ${sc.length} 件あります(スキルタブで確認。検出2回以上の候補は夜間バッチが登載伺いとして起票し、書庫タブの「決裁待ち」であなたの決裁を待ちます)。` });
+    text: `未採用のスキル候補が ${sc.length} 件あります(スキルタブで確認。検出2回以上の候補は夜間バッチが登載伺いとして起票し、「決裁・後閲」タブの「決裁待ち・未決」であなたの決裁を待ちます)。` });
   if (N.shelf_pending) out.push({ kind: "info", tag: "後閲待ち",
-    text: `後閲待ちの決裁文書が ${N.shelf_pending} 件あります(書庫タブで後閲印または差し戻し)。` });
+    text: `後閲待ちの決裁文書が ${N.shelf_pending} 件あります(「決裁・後閲」タブで後閲印または差し戻し)。` });
   const sy = (S.spool || {}).sync;
   if (sy && sy.failures >= 2) out.push({ kind: "warn", tag: "設定同期",
     text: `この端末の設定同期(git pull)が ${sy.failures} 回続けて失敗しています` +
@@ -160,7 +162,7 @@ function warnings() {
   if (N.kanribo && N.kanribo.manryou) out.push({ kind: "warn", tag: "満了",
     text: `保存期間が満了した行政文書ファイルが ${N.kanribo.manryou} 件あります(管理簿タブで確認。夜間バッチが廃棄伺い・移管として起票します)。` });
   if (N.shelf_miketsu) out.push({ kind: "info", tag: "未決",
-    text: `決裁待ち・未決の文書が ${N.shelf_miketsu} 件あります(skill登載・生ログ廃棄はあなたの決裁待ち、fact案件は翌晩のバッチが再審理。書庫タブの「決裁待ち・未決」で確認)。` });
+    text: `決裁待ち・未決の文書が ${N.shelf_miketsu} 件あります(skill登載・生ログ廃棄はあなたの決裁待ち、fact案件は翌晩のバッチが再審理。「決裁・後閲」タブの「決裁待ち・未決」で確認)。` });
   const B = S.builtin || {};
   if (B.captured_with && B.current_version && B.captured_with !== B.current_version) {
     out.push({ kind: "info", tag: "内蔵一覧が古い",
@@ -732,7 +734,7 @@ const KANRIBO_MEASURE = { haiki: "廃棄", ikan: "移管", jouyou: "常用" };
 function renderKanribo(el) {
   const filt = renderKanribo._filt || "genyou";
   el.innerHTML = `
-    <div class="note info"><span class="tag">仕組み</span><span>収集した記録は<b>分類・名称・保存期間・満了する日・満了時の措置</b>を与えて「行政文書ファイル」(集合物)にまとめ、この管理簿に載ります(整理)。措置は満了より前に決めておきます(レコードスケジュール)。満了したファイルは<b>廃棄伺い</b>または<b>移管</b>として書庫に起票され、決裁を経て実行されます。ここは閲覧のみです。</span></div>
+    <div class="note info"><span class="tag">仕組み</span><span>収集した記録は<b>分類・名称・保存期間・満了する日・満了時の措置</b>を与えて「行政文書ファイル」(集合物)にまとめ、この管理簿に載ります(整理)。措置は満了より前に決めておきます(レコードスケジュール)。満了したファイルは<b>廃棄伺い</b>または<b>移管</b>として起票され、「決裁・後閲」タブでの決裁を経て実行されます。ここは閲覧のみです。</span></div>
     <h2 class="section">標準文書保存期間基準(規程)</h2>
     <div class="card" id="kanriboRules">読み込み中…</div>
     <h2 class="section">行政文書ファイル管理簿</h2>
@@ -804,7 +806,7 @@ function renderKanribo(el) {
   })();
 }
 
-/* ---------------- 書庫(起案・決裁文書) ---------------- */
+/* ---------------- 起案・決裁文書(決裁・後閲/書庫の共通定義) ---------------- */
 
 const SHELF_STATE = {
   pending_review: ["審査中", "blue"], remanded_to_drafter: ["補正中", "warn"],
@@ -926,18 +928,165 @@ function docSkeleton() {
   </div>`;
 }
 
-function renderShelf(el) {
-  // 便リプレイのタイマーは再描画・タブ切替で必ず止める(描画済みDOMは捨てられるため)
-  clearTimeout(drawReplay._timer);
-  const filt = renderShelf._filt || "pending";
-  const kind = renderShelf._kind || "";
-  const state = renderShelf._state || "";
+/* 原本モーダル(決裁・後閲/書庫タブの共通部品)。docEl 配下に描画する。決裁・後閲の
+   操作が成功したら onChanged(渡っていれば呼び出し元の一覧・停留所マップ等の再読込)
+   してから自分自身を再読込する。readOnly=true(書庫タブ)では決裁・後閲の各操作を
+   一律禁止し、後閲セクション自体を出さない閲覧専用表示にする。 */
+async function openShelfDoc(docEl, id, onChanged, readOnly = false) {
+  docEl.innerHTML = docSkeleton();   // 押下への即時フィードバック(取得は数秒かかる)
+  let d;
+  try { d = await j(`/api/shelf_doc?id=${id}`); }
+  catch (e) { docEl.innerHTML = ""; toast(`取得失敗: ${e.message}`, 5000); return; }
+
+  // 決裁欄: 回議録から役職ごとの最終処理を拾い、済んだ欄に印鑑を押す
+  const log = d.log || [];
+  const stampOf = (actions) => {
+    const e2 = [...log].reverse().find((x) => actions.includes(x.action));
+    if (!e2) return null;
+    const actorStr = String(e2.actor || "");
+    return { seal: sealName(e2.actor),
+             who: actorStr.includes(":") ? actorStr.split(":")[1] : actorStr,
+             what: SHELF_ACTION[e2.action] || e2.action,
+             when: String(e2.created_at || "").slice(5, 10) };
+  };
+  const boxes = [["起案", stampOf(["kian", "hosei"])],
+                 ["審査", stampOf(["shinsa_ok", "joshin"])],
+                 ["決裁", stampOf(["kessai_ok", "hiketsu"])],
+                 ["後閲", stampOf(["kouetsu"])]];
+
+  const canKouetsu = !readOnly && d.seen_state === "pending" && ["executed", "rejected"].includes(d.state);
+  // 人間の決裁: 上申で止まっている skill/haiki/ikan 文書(文書管理規程 第4章)
+  const canKessai = !readOnly && d.state === "pending_decision" && ["skill", "haiki", "ikan"].includes(d.kind);
+  // 施行許可(旧経路互換): LLM決裁済みで施行前の skill/haiki/ikan 文書
+  const canApproveExec = !readOnly && d.seen_state === "pending" && d.state === "approved"
+    && ["skill", "haiki", "ikan"].includes(d.kind);
+  const APPROVE_LABEL = { skill: "翌晩skills/へ登載", haiki: "翌晩廃棄を施行", ikan: "翌晩移管を施行" };
+  const canRemand = !readOnly && d.seen_state === "pending" && ["executed", "approved"].includes(d.state);
+
+  docEl.innerHTML = `
+    <div class="modal-back" id="docBack">
+    <div class="doc-modal">
+      <div class="toolrow">
+        <span class="chip">${esc(SHELF_KIND[d.kind] || d.kind)}</span>
+        ${chipOf(SHELF_STATE, d.state)}
+        ${d.decision_class ? `<span class="chip ${d.decision_class === "senketsu" ? "ok" : "warn"}">${DECISION_CLASS[d.decision_class] || d.decision_class}</span>` : ""}
+        ${seenChip(d)}
+        <span style="flex:1"></span>
+        <button class="btn mini ghost" id="docClose">閉じる</button>
+      </div>
+      <div class="doc-paper">
+        <div class="dp-head">
+          <span class="dp-no">${esc(docNoDisp(d))}</span>
+          <span class="dp-date">起案 ${esc(String(d.created_at || "").slice(0, 10))} · ${esc(d.project_key)}</span>
+        </div>
+        <div class="kessai-ran">
+          ${boxes.map(([role, s]) => `<div class="kbox${s ? " done" : ""}">
+            <div class="kr">${role}</div>
+            <div class="kin">${s ? (s.seal ? `<span class="hanko">${s.seal}</span>`
+              : `<span class="kv">${esc(s.what)}</span>`) : ""}</div>
+            <div class="kd">${s ? `${esc(s.what)}<br><span class="mono">${esc(s.who)}</span><br>${esc(s.when)}` : "—"}</div>
+          </div>`).join("")}
+        </div>
+        <div class="dp-title">${esc(d.title)}</div>
+        <div class="dp-body">${esc(d.proposal || "")}</div>
+      </div>
+      ${routeStrip(log)}
+      ${(d.facts || []).length ? `<h2 class="section">登載facts</h2><table>
+        <tr><th>id</th><th>内容</th><th>状態</th></tr>
+        ${d.facts.map((f) => `<tr><td class="num">${f.id}</td>
+          <td style="white-space:pre-wrap">${esc(f.content)}</td>
+          <td><span class="chip ${f.status === "verified" ? "ok" : "warn"}">${esc(factStatusLabel(f.status))}</span>
+            ${f.retired ? '<span class="chip err">撤去済</span>' : ""}
+            ${f.superseded ? '<span class="chip warn">置換済</span>' : ""}</td></tr>`).join("")}
+      </table>` : ""}
+      ${(d.related || []).length ? `<h2 class="section">関連文書</h2>
+        ${d.related.map((r) => `<div><a href="${esc(location.hash || "#shelf")}" class="rel-doc mono" data-id="${r.id}">${esc(r.doc_no)}</a> ${esc(SHELF_KIND[r.kind] || r.kind)} — ${esc(r.title)} ${chipOf(SHELF_STATE, r.state)}</div>`).join("")}` : ""}
+      <h2 class="section">回議録</h2>
+      <table>
+        <tr><th>日時</th><th>担当</th><th>処理</th><th>memo</th></tr>
+        ${log.map((e2) => `<tr>
+          <td class="mono faint" style="white-space:nowrap">${esc(String(e2.created_at || "").slice(5, 16).replace("T", " "))}</td>
+          <td class="mono">${esc(e2.actor)}</td>
+          <td>${esc(SHELF_ACTION[e2.action] || e2.action)}</td>
+          <td style="white-space:pre-wrap">${esc(e2.memo || "—")}</td></tr>`).join("")}
+      </table>
+      ${canKessai ? `<h2 class="section">決裁</h2>
+        <div class="toolrow">
+          <button class="btn mini" id="opKessai">決裁(承認 — ${APPROVE_LABEL[d.kind]})</button>
+        </div>
+        <div class="toolrow">
+          <span class="lnfield" style="flex:1"><span class="ln1" aria-hidden="true">1</span>
+            <input type="text" id="kessaiRemandMemo" placeholder="差戻メモ(必須。審査への指示。廃案にすべきならその旨を)"></span>
+          <button class="btn mini danger" id="opKessaiRemand">差戻(翌晩、審査が再検討)</button>
+        </div>` : ""}
+      ${readOnly ? "" : `<h2 class="section">後閲</h2>
+      ${canKouetsu || canApproveExec || canRemand ? `
+        <div class="toolrow">
+          ${canKouetsu ? '<button class="btn mini" id="opKouetsu">後閲印(確認済)</button>' : ""}
+          ${canApproveExec ? `<button class="btn mini" id="opApproveExec">後閲印(施行許可 — ${APPROVE_LABEL[d.kind]})</button>` : ""}
+        </div>
+        ${canRemand ? `<div class="toolrow">
+          <span class="lnfield" style="flex:1"><span class="ln1" aria-hidden="true">1</span>
+            <input type="text" id="remandMemo" placeholder="差し戻しメモ(必須。前の担当者への指示。例: この事実は誤り、撤回してほしい)"></span>
+          <button class="btn mini danger" id="opRemand">${d.state === "approved" ? "差し戻し(廃案)" : "差し戻し(翌晩再審理)"}</button>
+        </div>` : ""}` : `<span class="faint">この文書に後閲操作はありません(${canKessai ? "決裁待ち" : SHELF_SEEN[d.seen_state] ? SHELF_SEEN[d.seen_state][0] : d.seen_state})。</span>`}`}
+    </div>
+    </div>`;
+
+  // 閉じる: ボタン・背景クリック・Esc。再表示時は前回のEscリスナを外してから付ける
+  const close = () => {
+    docEl.innerHTML = "";
+    if (docEl._onKey) { document.removeEventListener("keydown", docEl._onKey); docEl._onKey = null; }
+  };
+  if (docEl._onKey) document.removeEventListener("keydown", docEl._onKey);
+  docEl._onKey = (ev) => {
+    if (!docEl.isConnected) { document.removeEventListener("keydown", docEl._onKey); return; }
+    if (ev.key === "Escape") close();
+  };
+  document.addEventListener("keydown", docEl._onKey);
+  $("#docClose", docEl).onclick = close;
+  $("#docBack", docEl).onclick = (ev) => { if (ev.target.id === "docBack") close(); };
+  docEl.querySelectorAll(".rel-doc").forEach((a) => {
+    a.onclick = (ev) => { ev.preventDefault(); openShelfDoc(docEl, Number(a.dataset.id), onChanged, readOnly); };
+  });
+  const op = async (body, okMsg) => {
+    try {
+      await j("/api/shelf_op", { method: "POST", body: JSON.stringify(body) });
+      toast(okMsg);
+      if (onChanged) await onChanged();
+      await openShelfDoc(docEl, id, onChanged, readOnly);
+    } catch (e) { toast(`失敗: ${e.message}`, 6000); }
+  };
+  const bk = $("#opKouetsu", docEl);
+  if (bk) bk.onclick = () => op({ op: "kouetsu", id }, "後閲印を押しました");
+  const ba = $("#opApproveExec", docEl);
+  if (ba) ba.onclick = () => op({ op: "approve_exec", id },
+    `施行を許可しました(${APPROVE_LABEL[d.kind]})`);
+  const bs2 = $("#opKessai", docEl);
+  if (bs2) bs2.onclick = () => op({ op: "kessai", id }, `決裁しました(${APPROVE_LABEL[d.kind]})`);
+  const bkr = $("#opKessaiRemand", docEl);
+  if (bkr) bkr.onclick = () => {
+    const memo = $("#kessaiRemandMemo", docEl).value.trim();
+    if (!memo) { toast("差戻メモを書いてください(審査への指示)", 4000); return; }
+    op({ op: "remand", id, memo }, "差し戻しました(翌晩、審査が再検討します)");
+  };
+  const br = $("#opRemand", docEl);
+  if (br) br.onclick = () => {
+    const memo = $("#remandMemo", docEl).value.trim();
+    if (!memo) { toast("差し戻しメモを書いてください(前の担当者への指示)", 4000); return; }
+    op({ op: "remand", id, memo }, "差し戻しました(翌晩の便で再審理されます)");
+  };
+}
+
+function renderKessai(el) {
+  const filt = renderKessai._filt || "miketsu";
+  const kind = renderKessai._kind || "";
   el.innerHTML = `
-    <div class="note info"><span class="tag">仕組み</span><span>夜間バッチの判断は起案文書として起票され、審査(課長)・決裁を経て施行されます。<b>skill登載と生ログの廃棄は人間の決裁事項</b>: 審査の上申で止まり、「決裁待ち」であなたの<b>決裁</b>(問題があれば<b>差戻</b> — 翌晩、審査がメモを踏まえて補正・再上申または廃案)を待ちます。決裁したら翌晩施行。それ以外(facts登載・ルーチンの廃棄等)はLLMが決裁して施行し、人間はここで<b>後閲</b>します: 妥当なら後閲印、問題があれば<b>メモを付けて差し戻し</b> — 翌晩の便で決裁者が再審理し、是正文書を起票します。文書をクリックすると原本が開き、決裁欄に押印されます(俳句=haiku・曽根=sonnet・尾羽=opus・人間)。専決規程(モデルの役割分担)の変更は「監理」タブへ。</span></div>
+    <div class="note info"><span class="tag">仕組み</span><span>夜間バッチの判断は起案文書として起票され、審査(課長)・決裁を経て施行されます。<b>skill登載と生ログの廃棄は人間の決裁事項</b>: 審査の上申で止まり、「決裁待ち・未決」(審査中も含む)であなたの<b>決裁</b>(問題があれば<b>差戻</b> — 翌晩、審査がメモを踏まえて補正・再上申または廃案)を待ちます。決裁したら翌晩施行(決裁済・施行待ち)。それ以外(facts登載・ルーチンの廃棄等)はLLMが決裁して施行し、人間はここで<b>後閲</b>します: 妥当なら後閲印、問題があれば<b>メモを付けて差し戻し</b> — 翌晩の便で決裁者が再審理し、是正文書を起票します。LLM決裁直後のskill/haiki/ikan文書は施行条件が後閲印のため「後閲待ち」と「決裁済・施行待ち」の両方に出ます(仕様どおりの重複)。文書をクリックすると原本が開き、決裁欄に押印されます(俳句=haiku・曽根=sonnet・尾羽=opus・人間)。完結(施行済・廃案で後閲済み等)した文書は「書庫」タブへ移ります。</span></div>
     <div class="card" id="stnMap" style="margin-top:14px">読み込み中…</div>
-    <div class="card" id="replayCard" style="margin-top:14px"></div>
     <div class="toolrow" style="margin-top:14px" id="shelfFilters">
-      ${[["pending", "後閲待ち"], ["remanded", "差し戻し・再審理中"], ["miketsu", "決裁待ち・未決"], ["all", "全件"]].map(([v, l]) =>
+      ${[["miketsu", "決裁待ち・未決"], ["remanded", "差し戻し・再審理中"],
+         ["pending", "後閲待ち"], ["kiketsu", "決裁済・施行待ち"]].map(([v, l]) =>
         `<button class="btn mini${filt === v ? "" : " ghost"}" data-f="${v}">${l}</button>`).join("")}
       <select id="shelfKind">
         <option value="">全種別</option>
@@ -946,15 +1095,15 @@ function renderShelf(el) {
       </select>
     </div>
     <div class="card" id="shelfList">読み込み中…</div>
-    <div id="shelfDoc"></div>`;
+    <div id="shelfDoc"></div>
+    <h2 class="section">専決規程(モデルの役割分担) — NAS batch/config.json</h2>
+    <div class="card" id="kiteiCard"></div>`;
 
   drawStationMap(el);
-  drawReplay($("#replayCard", el));
-  // フィルタボタンは見方そのものの切替なので、停留所クリックで付いた state 絞り込みは外す
   el.querySelectorAll("#shelfFilters .btn").forEach((b) => {
-    b.onclick = () => { renderShelf._filt = b.dataset.f; renderShelf._state = ""; renderShelf(el); };
+    b.onclick = () => { renderKessai._filt = b.dataset.f; renderKessai(el); };
   });
-  $("#shelfKind", el).onchange = (e) => { renderShelf._kind = e.target.value; renderShelf(el); };
+  $("#shelfKind", el).onchange = (e) => { renderKessai._kind = e.target.value; renderKessai(el); };
 
   const listEl = $("#shelfList", el);
   const docEl = $("#shelfDoc", el);
@@ -962,7 +1111,7 @@ function renderShelf(el) {
   async function loadList() {
     listEl.innerHTML = shelfListSkeleton();
     try {
-      const rows = await j(`/api/shelf?filter=${filt}${kind ? `&kind=${kind}` : ""}${state ? `&state=${state}` : ""}`);
+      const rows = await j(`/api/shelf?filter=${filt}${kind ? `&kind=${kind}` : ""}`);
       if (!rows.length) {
         listEl.innerHTML = '<span class="faint">該当する文書はありません。</span>';
         return;
@@ -981,168 +1130,79 @@ function renderShelf(el) {
         </tr>`).join("")}
       </table>`;
       listEl.querySelectorAll(".shelf-row").forEach((tr) => {
-        tr.onclick = () => loadDoc(Number(tr.dataset.id));
+        tr.onclick = () => openShelfDoc(docEl, Number(tr.dataset.id), refreshAfterOp);
       });
     } catch (e) { listEl.textContent = `取得失敗: ${e.message}`; }
   }
 
-  async function loadDoc(id) {
-    docEl.innerHTML = docSkeleton();   // 押下への即時フィードバック(取得は数秒かかる)
-    let d;
-    try { d = await j(`/api/shelf_doc?id=${id}`); }
-    catch (e) { docEl.innerHTML = ""; toast(`取得失敗: ${e.message}`, 5000); return; }
+  // 決裁・後閲の操作後は一覧に加えて停留所マップの件数も古びるので両方引き直す
+  async function refreshAfterOp() {
+    await loadList();
+    await drawStationMap(el);
+  }
 
-    // 決裁欄: 回議録から役職ごとの最終処理を拾い、済んだ欄に印鑑を押す
-    const log = d.log || [];
-    const stampOf = (actions) => {
-      const e2 = [...log].reverse().find((x) => actions.includes(x.action));
-      if (!e2) return null;
-      const actorStr = String(e2.actor || "");
-      return { seal: sealName(e2.actor),
-               who: actorStr.includes(":") ? actorStr.split(":")[1] : actorStr,
-               what: SHELF_ACTION[e2.action] || e2.action,
-               when: String(e2.created_at || "").slice(5, 10) };
-    };
-    const boxes = [["起案", stampOf(["kian", "hosei"])],
-                   ["審査", stampOf(["shinsa_ok", "joshin"])],
-                   ["決裁", stampOf(["kessai_ok", "hiketsu"])],
-                   ["後閲", stampOf(["kouetsu"])]];
+  loadList();
+  drawKitei($("#kiteiCard", el));
+}
 
-    const canKouetsu = d.seen_state === "pending" && ["executed", "rejected"].includes(d.state);
-    // 人間の決裁: 上申で止まっている skill/haiki/ikan 文書(文書管理規程 第4章)
-    const canKessai = d.state === "pending_decision" && ["skill", "haiki", "ikan"].includes(d.kind);
-    // 施行許可(旧経路互換): LLM決裁済みで施行前の skill/haiki/ikan 文書
-    const canApproveExec = d.seen_state === "pending" && d.state === "approved"
-      && ["skill", "haiki", "ikan"].includes(d.kind);
-    const APPROVE_LABEL = { skill: "翌晩skills/へ登載", haiki: "翌晩廃棄を施行", ikan: "翌晩移管を施行" };
-    const canRemand = d.seen_state === "pending" && ["executed", "approved"].includes(d.state);
+/* ---------------- 書庫(完結文書の閲覧専用書庫) ---------------- */
 
-    docEl.innerHTML = `
-      <div class="modal-back" id="docBack">
-      <div class="doc-modal">
-        <div class="toolrow">
-          <span class="chip">${esc(SHELF_KIND[d.kind] || d.kind)}</span>
-          ${chipOf(SHELF_STATE, d.state)}
-          ${d.decision_class ? `<span class="chip ${d.decision_class === "senketsu" ? "ok" : "warn"}">${DECISION_CLASS[d.decision_class] || d.decision_class}</span>` : ""}
-          ${seenChip(d)}
-          <span style="flex:1"></span>
-          <button class="btn mini ghost" id="docClose">閉じる</button>
-        </div>
-        <div class="doc-paper">
-          <div class="dp-head">
-            <span class="dp-no">${esc(docNoDisp(d))}</span>
-            <span class="dp-date">起案 ${esc(String(d.created_at || "").slice(0, 10))} · ${esc(d.project_key)}</span>
-          </div>
-          <div class="kessai-ran">
-            ${boxes.map(([role, s]) => `<div class="kbox${s ? " done" : ""}">
-              <div class="kr">${role}</div>
-              <div class="kin">${s ? (s.seal ? `<span class="hanko">${s.seal}</span>`
-                : `<span class="kv">${esc(s.what)}</span>`) : ""}</div>
-              <div class="kd">${s ? `${esc(s.what)}<br><span class="mono">${esc(s.who)}</span><br>${esc(s.when)}` : "—"}</div>
-            </div>`).join("")}
-          </div>
-          <div class="dp-title">${esc(d.title)}</div>
-          <div class="dp-body">${esc(d.proposal || "")}</div>
-        </div>
-        ${routeStrip(log)}
-        ${(d.facts || []).length ? `<h2 class="section">登載facts</h2><table>
-          <tr><th>id</th><th>内容</th><th>状態</th></tr>
-          ${d.facts.map((f) => `<tr><td class="num">${f.id}</td>
-            <td style="white-space:pre-wrap">${esc(f.content)}</td>
-            <td><span class="chip ${f.status === "verified" ? "ok" : "warn"}">${esc(factStatusLabel(f.status))}</span>
-              ${f.retired ? '<span class="chip err">撤去済</span>' : ""}
-              ${f.superseded ? '<span class="chip warn">置換済</span>' : ""}</td></tr>`).join("")}
-        </table>` : ""}
-        ${(d.related || []).length ? `<h2 class="section">関連文書</h2>
-          ${d.related.map((r) => `<div><a href="#shelf" class="rel-doc mono" data-id="${r.id}">${esc(r.doc_no)}</a> ${esc(SHELF_KIND[r.kind] || r.kind)} — ${esc(r.title)} ${chipOf(SHELF_STATE, r.state)}</div>`).join("")}` : ""}
-        <h2 class="section">回議録</h2>
-        <table>
-          <tr><th>日時</th><th>担当</th><th>処理</th><th>memo</th></tr>
-          ${log.map((e2) => `<tr>
-            <td class="mono faint" style="white-space:nowrap">${esc(String(e2.created_at || "").slice(5, 16).replace("T", " "))}</td>
-            <td class="mono">${esc(e2.actor)}</td>
-            <td>${esc(SHELF_ACTION[e2.action] || e2.action)}</td>
-            <td style="white-space:pre-wrap">${esc(e2.memo || "—")}</td></tr>`).join("")}
-        </table>
-        ${canKessai ? `<h2 class="section">決裁</h2>
-          <div class="toolrow">
-            <button class="btn mini" id="opKessai">決裁(承認 — ${APPROVE_LABEL[d.kind]})</button>
-          </div>
-          <div class="toolrow">
-            <span class="lnfield" style="flex:1"><span class="ln1" aria-hidden="true">1</span>
-              <input type="text" id="kessaiRemandMemo" placeholder="差戻メモ(必須。審査への指示。廃案にすべきならその旨を)"></span>
-            <button class="btn mini danger" id="opKessaiRemand">差戻(翌晩、審査が再検討)</button>
-          </div>` : ""}
-        <h2 class="section">後閲</h2>
-        ${canKouetsu || canApproveExec || canRemand ? `
-          <div class="toolrow">
-            ${canKouetsu ? '<button class="btn mini" id="opKouetsu">後閲印(確認済)</button>' : ""}
-            ${canApproveExec ? `<button class="btn mini" id="opApproveExec">後閲印(施行許可 — ${APPROVE_LABEL[d.kind]})</button>` : ""}
-          </div>
-          ${canRemand ? `<div class="toolrow">
-            <span class="lnfield" style="flex:1"><span class="ln1" aria-hidden="true">1</span>
-              <input type="text" id="remandMemo" placeholder="差し戻しメモ(必須。前の担当者への指示。例: この事実は誤り、撤回してほしい)"></span>
-            <button class="btn mini danger" id="opRemand">${d.state === "approved" ? "差し戻し(廃案)" : "差し戻し(翌晩再審理)"}</button>
-          </div>` : ""}` : `<span class="faint">この文書に後閲操作はありません(${canKessai ? "決裁待ち" : SHELF_SEEN[d.seen_state] ? SHELF_SEEN[d.seen_state][0] : d.seen_state})。</span>`}
-      </div>
-      </div>`;
+function renderShelf(el) {
+  const kind = renderShelf._kind || "";
+  el.innerHTML = `
+    <div class="note info"><span class="tag">仕組み</span><span>施行済・廃案で人間の操作が残っていない文書(後閲印を押したもの、人間が自ら決裁して施行されたもの、承認前に差し戻されて廃案になった終端文書)だけを載せる閲覧専用の書庫です。決裁待ち・審査中・後閲待ち・決裁済(施行待ち)・差し戻し・再審理中(まだ処理できるもの)の文書はここには出ません(「決裁・後閲」タブへ)。文書をクリックすると原本(決裁欄・回議録)が開きます(閲覧のみ)。</span></div>
+    <div class="toolrow" style="margin-top:14px">
+      <select id="shelfKind">
+        <option value="">全種別</option>
+        ${Object.entries(SHELF_KIND).map(([v, l]) =>
+          `<option value="${v}"${kind === v ? " selected" : ""}>${l}</option>`).join("")}
+      </select>
+    </div>
+    <div class="card" id="shelfList">読み込み中…</div>
+    <div id="shelfDoc"></div>`;
 
-    // 閉じる: ボタン・背景クリック・Esc。再表示時は前回のEscリスナを外してから付ける
-    const close = () => {
-      docEl.innerHTML = "";
-      if (docEl._onKey) { document.removeEventListener("keydown", docEl._onKey); docEl._onKey = null; }
-    };
-    if (docEl._onKey) document.removeEventListener("keydown", docEl._onKey);
-    docEl._onKey = (ev) => {
-      if (!docEl.isConnected) { document.removeEventListener("keydown", docEl._onKey); return; }
-      if (ev.key === "Escape") close();
-    };
-    document.addEventListener("keydown", docEl._onKey);
-    $("#docClose", docEl).onclick = close;
-    $("#docBack", docEl).onclick = (ev) => { if (ev.target.id === "docBack") close(); };
-    docEl.querySelectorAll(".rel-doc").forEach((a) => {
-      a.onclick = (ev) => { ev.preventDefault(); loadDoc(Number(a.dataset.id)); };
-    });
-    const op = async (body, okMsg) => {
-      try {
-        await j("/api/shelf_op", { method: "POST", body: JSON.stringify(body) });
-        toast(okMsg);
-        await loadList();
-        await loadDoc(id);
-      } catch (e) { toast(`失敗: ${e.message}`, 6000); }
-    };
-    const bk = $("#opKouetsu", docEl);
-    if (bk) bk.onclick = () => op({ op: "kouetsu", id }, "後閲印を押しました");
-    const ba = $("#opApproveExec", docEl);
-    if (ba) ba.onclick = () => op({ op: "approve_exec", id },
-      `施行を許可しました(${APPROVE_LABEL[d.kind]})`);
-    const bs2 = $("#opKessai", docEl);
-    if (bs2) bs2.onclick = () => op({ op: "kessai", id }, `決裁しました(${APPROVE_LABEL[d.kind]})`);
-    const bkr = $("#opKessaiRemand", docEl);
-    if (bkr) bkr.onclick = () => {
-      const memo = $("#kessaiRemandMemo", docEl).value.trim();
-      if (!memo) { toast("差戻メモを書いてください(審査への指示)", 4000); return; }
-      op({ op: "remand", id, memo }, "差し戻しました(翌晩、審査が再検討します)");
-    };
-    const br = $("#opRemand", docEl);
-    if (br) br.onclick = () => {
-      const memo = $("#remandMemo", docEl).value.trim();
-      if (!memo) { toast("差し戻しメモを書いてください(前の担当者への指示)", 4000); return; }
-      op({ op: "remand", id, memo }, "差し戻しました(翌晩の便で再審理されます)");
-    };
+  $("#shelfKind", el).onchange = (e) => { renderShelf._kind = e.target.value; renderShelf(el); };
+
+  const listEl = $("#shelfList", el);
+  const docEl = $("#shelfDoc", el);
+
+  async function loadList() {
+    listEl.innerHTML = shelfListSkeleton();
+    try {
+      const rows = await j(`/api/shelf?filter=kanketsu${kind ? `&kind=${kind}` : ""}`);
+      if (!rows.length) {
+        listEl.innerHTML = '<span class="faint">該当する文書はありません。</span>';
+        return;
+      }
+      listEl.innerHTML = `<table>
+        <tr><th>文書番号</th><th>種別</th><th>project</th><th>件名</th><th>決裁区分</th><th>状態</th><th>後閲</th><th>起案日</th></tr>
+        ${rows.map((r) => `<tr class="click shelf-row" data-id="${r.id}" style="cursor:pointer">
+          <td class="mono" style="white-space:nowrap">${esc(docNoDisp(r))}</td>
+          <td>${esc(SHELF_KIND[r.kind] || r.kind)}</td>
+          <td class="mono faint">${esc(r.project_key)}</td>
+          <td>${esc(r.title)}</td>
+          <td>${r.decision_class ? (DECISION_CLASS[r.decision_class] || r.decision_class) : "—"}</td>
+          <td>${chipOf(SHELF_STATE, r.state)}</td>
+          <td>${seenChip(r)}</td>
+          <td class="mono faint" style="white-space:nowrap">${esc(String(r.created_at || "").slice(0, 10))}</td>
+        </tr>`).join("")}
+      </table>`;
+      listEl.querySelectorAll(".shelf-row").forEach((tr) => {
+        tr.onclick = () => openShelfDoc(docEl, Number(tr.dataset.id), loadList, true);
+      });
+    } catch (e) { listEl.textContent = `取得失敗: ${e.message}`; }
   }
 
   loadList();
 }
 
-/* A1 停留所マップ。書庫タブ冒頭の路線図。上段は起案から後閲までの本線、下段は差し戻し・
+/* A1 停留所マップ。決裁・後閲タブ冒頭の路線図。上段は起案から後閲までの本線、下段は差し戻し・
    再審理の戻り線。各停留所に担当モデル(専決規程の roles)と滞留件数を出し、クリックで
    下の一覧を絞り込む。件数は /api/shelf_counts。0件のときはバッジを出さず枠だけ残す。 */
 async function drawStationMap(el) {
   const card = $("#stnMap", el);
   if (!card) return;
-  const filt = renderShelf._filt || "pending";
-  const state = renderShelf._state || "";
+  const filt = renderKessai._filt || "miketsu";
   const roles = (N.batch_config || {}).roles || {};
   let c;
   try { c = await j("/api/shelf_counts"); }
@@ -1155,24 +1215,30 @@ async function drawStationMap(el) {
     return;
   }
 
+  // 停留所クリックは決裁・後閲タブが持つキューのフィルタ(miketsu/remanded/pending/kiketsu)
+  // だけに揃える(任意の state への直接絞り込みはしない — 完結文書がタブに紛れ込むのを防ぐ)。
   // 起案席に滞留する状態は「補正中」で、これは下段の戻り線に出すため上段は件数を持たない
+  // 「決裁」の件数(pending_decision)がそのまま未決件数でもあるため、
+  // 別ソース(N.shelf_miketsu)由来の二重バッジは持たない(本体バッジと同量になり、
+  // 操作で片方だけ更新されると食い違うため)
   const stns = [
     { name: "起案", model: roles.kian || "", n: 0 },
-    { name: "審査", model: roles.shinsa || "", n: c.pending_review, filt: "all", state: "pending_review" },
-    { name: "決裁", model: roles.kessai || "", n: c.pending_decision, filt: "all", state: "pending_decision",
-      extra: N.shelf_miketsu ? { label: `未決 ${num(N.shelf_miketsu)}`, cls: "warn", filt: "miketsu", state: "" } : null },
-    { name: "決裁済", model: "", n: c.approved, filt: "all", state: "approved" },
-    { name: "施行", model: "system", n: c.executed, filt: "all", state: "executed" },
-    { name: "後閲", model: "human", n: c.kouetsu_pending, cls: "warn", filt: "pending", state: "" },
+    { name: "審査", model: roles.shinsa || "", n: c.pending_review, filt: "miketsu" },
+    { name: "決裁", model: roles.kessai || "", n: c.pending_decision, filt: "miketsu" },
+    { name: "決裁済", model: "", n: c.approved, filt: "kiketsu" },
+    // 施行の件数は施行済み全件ではなく、まだ後閲されていない分だけ(全件だと後閲済み分も
+    // 積み上がって減らない数字になる)。クリック先の「後閲待ち」一覧には rejected/approved
+    // 分も混ざるため、バッジの件数と一覧の件数は厳密には一致しない
+    { name: "施行", model: "system", n: c.executed_pending, filt: "pending" },
+    { name: "後閲", model: "human", n: c.kouetsu_pending, cls: "warn", filt: "pending" },
   ];
   const stnHtml = (s) => {
-    const on = s.filt && s.filt === filt && (s.state || "") === state;
-    return `<div class="stn${s.filt ? " click" : ""}${on ? " sel" : ""}"${s.filt ? ` data-filt="${s.filt}" data-state="${esc(s.state || "")}"` : ""}>
+    const on = s.filt && s.filt === filt;
+    return `<div class="stn${s.filt ? " click" : ""}${on ? " sel" : ""}"${s.filt ? ` data-filt="${s.filt}"` : ""}>
       <div class="stn-name">${esc(s.name)}</div>
       <div class="stn-model mono faint">${esc(s.model || "—")}</div>
       <div class="stn-n">
         ${s.n ? `<span class="chip ${s.cls || "blue"}">${num(s.n)}</span>` : ""}
-        ${s.extra ? `<span class="chip ${s.extra.cls} click" data-filt="${s.extra.filt}" data-state="">${esc(s.extra.label)}</span>` : ""}
       </div>
     </div>`;
   };
@@ -1182,14 +1248,14 @@ async function drawStationMap(el) {
     (i === stns.length - 1 ? "" : i === 1 ? branch : '<span class="stn-arrow"></span>')).join("");
 
   const backs = [
-    { st: "remanded_to_drafter", to: "起案へ", n: c.remanded_to_drafter, filt: "all", state: "remanded_to_drafter" },
-    { st: "remanded_to_reviewer", to: "審査へ", n: c.remanded_to_reviewer, filt: "all", state: "remanded_to_reviewer" },
-    { st: "reexamine", to: "決裁へ(翌晩再審理)", n: c.reexamine, filt: "remanded", state: "" },
+    { st: "remanded_to_drafter", to: "起案へ", n: c.remanded_to_drafter, filt: "remanded" },
+    { st: "remanded_to_reviewer", to: "審査へ", n: c.remanded_to_reviewer, filt: "remanded" },
+    { st: "reexamine", to: "決裁へ(翌晩再審理)", n: c.reexamine, filt: "remanded" },
   ].filter((b) => b.n);
   const backHtml = `<div class="stn-back">
     <span class="stn-back-arrow"></span>
     <span class="faint">戻り線</span>
-    ${backs.length ? backs.map((b) => `<span class="chip warn click" data-filt="${b.filt}" data-state="${esc(b.state)}">${esc(SHELF_STATE[b.st][0])} ${b.to} · ${num(b.n)}</span>`).join("")
+    ${backs.length ? backs.map((b) => `<span class="chip warn click" data-filt="${b.filt}">${esc(SHELF_STATE[b.st][0])} ${b.to} · ${num(b.n)}</span>`).join("")
       : '<span class="faint">戻っている文書はありません。</span>'}
   </div>`;
 
@@ -1200,9 +1266,8 @@ async function drawStationMap(el) {
   card.querySelectorAll("[data-filt]").forEach((n2) => {
     n2.onclick = (ev) => {
       ev.stopPropagation();
-      renderShelf._filt = n2.dataset.filt;
-      renderShelf._state = n2.dataset.state || "";
-      renderShelf(el);
+      renderKessai._filt = n2.dataset.filt;
+      renderKessai(el);
     };
   });
 }
@@ -1417,7 +1482,7 @@ function renderSkills(el) {
   const cands = S.skill_candidates || [];
   const candHtml = cands.length ? `
     <h2 class="section">スキル候補(自動発掘・未採用) — ${cands.length} 件</h2>
-    <div class="note info"><span class="tag">仕組み</span><span>日次バッチが全端末のログから反復手順を発掘した候補です。ここにある間は何も発動しません。検出2回以上の新規候補は夜間バッチが登載伺いとして起票し、審査(課長)の上申を経て書庫の「決裁待ち」に並びます。あなたが決裁すると翌晩 skills/ に登載され、全端末へ配布されます。改善提案(improve)は従来どおり人間が判断します。不要な候補は skills-candidates/ から削除してください。</span></div>
+    <div class="note info"><span class="tag">仕組み</span><span>日次バッチが全端末のログから反復手順を発掘した候補です。ここにある間は何も発動しません。検出2回以上の新規候補は夜間バッチが登載伺いとして起票し、審査(課長)の上申を経て「決裁・後閲」タブの「決裁待ち・未決」に並びます。あなたが決裁すると翌晩 skills/ に登載され、全端末へ配布されます。改善提案(improve)は従来どおり人間が判断します。不要な候補は skills-candidates/ から削除してください。</span></div>
     <div class="card"><table>
       <tr><th>名前</th><th>種別</th><th>要約</th><th style="text-align:right">検出回数</th><th style="text-align:right">根拠turns</th><th>最終検出</th><th></th></tr>
       ${cands.map((c, i) => `<tr>
@@ -1627,43 +1692,7 @@ function renderHooks(el) {
 
 function renderKanri(el) {
   el.innerHTML = `
-    <div class="note info"><span class="tag">このタブ</span><span>パイプラインの監理です。収受から除外するもの(sync-exclude)、専決規程(モデルの役割分担)、NAS 側夜間バッチの実行状況、端末側の接続設定と hook スクリプト、配布リポジトリの状態を確認・変更します。受付台帳そのものは「収受簿」タブへ。</span></div>
-    <h2 class="section">専決規程(モデルの役割分担) — NAS batch/config.json</h2>
-    <div class="card" id="kiteiCard"></div>
-    <h2 class="section">収集除外 sync-exclude.txt(全端末に配布・手動管理で安全に編集可)</h2>
-    <div class="card">
-      <div class="toolrow"><span class="faint">${esc(S.sync_exclude.path)}</span>
-        <span style="flex:1"></span><button class="btn mini" id="syncSave">保存</button></div>
-      <div class="editor-wrap">
-        <div class="editor-gutter" id="syncGutter" aria-hidden="true"></div>
-        <textarea class="editor" id="syncText" style="min-height:260px" spellcheck="false"></textarea>
-      </div>
-    </div>
-
-    <h2 class="section">NAS 夜間バッチ(crontab)</h2>
-    ${(() => {
-      const bc = N.batch_config;
-      return bc && bc.model
-        ? `<div class="note info"><span class="tag">モデル</span><span>バッチの claude -p は <span class="mono">${esc(bc.model)}</span> で実行(設定: <span class="mono">/volume2/claude-system/batch/config.json</span>。実際に使われたモデルは各 batch/*.log の claude-usage 行に model= で記録)。</span></div>`
-        : `<div class="note warn"><span class="tag">モデル未設定</span><span>NAS の batch/config.json が無いか model が空です。CLI デフォルトで動くため、デフォルト変更で夜間バッチのモデルが黙って変わります。</span></div>`;
-    })()}
-    <div class="card"><code class="block">${esc(S.crontab)}</code></div>
-
-    <h2 class="section">バッチ実行履歴(直近${N.batch_runs.length}件)</h2>
-    <div class="note info"><span class="tag">読み方</span><span>時刻はUTC(JSTは+9時間)。ロック敗退や cron 起動失敗はここに row を残さず「時間が来ても行が増えない」形で現れます — その検知は文書事務概況タブの注意欄(未記録・成功が古い・滞留)が担当します。</span></div>
-    <div class="card"><table>
-      <tr><th>run</th><th>種別</th><th>開始</th><th>終了</th><th>状態</th><th style="text-align:right">turns処理</th><th style="text-align:right">例規行</th><th>メモ</th></tr>
-      ${N.batch_runs.map((b) => `<tr>
-        <td class="num">${b.id}</td>
-        <td class="mono">${esc(batchKind(b.notes))}</td>
-        <td class="mono faint">${esc(String(b.started_at || "").slice(5, 16).replace("T", " "))}</td>
-        <td class="mono faint">${esc(String(b.finished_at || "").slice(5, 16).replace("T", " "))}</td>
-        <td><span class="chip ${b.status === "success" ? "ok" : b.status === "running" ? "" : "err"}">${esc(b.status)}</span></td>
-        <td class="num">${b.turns_processed ?? "·"}</td>
-        <td class="num">${b.index_lines ?? "·"}</td>
-        <td class="faint" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(b.notes || "")}">${esc(String(b.notes || ""))}</td></tr>`).join("")}
-    </table></div>
-
+    <div class="note info"><span class="tag">このタブ</span><span>端末側の設定管理です。この端末の実接続設定(~/.claude-spool)、端末側の hook スクリプト、配布リポジトリ(claude-config)の状態を確認します。収受除外は「収受簿」タブ、専決規程(モデルの役割分担)は「決裁・後閲」タブ、NAS 側夜間バッチの実行状況は「逓送」タブへ。</span></div>
     <h2 class="section">この端末の実接続設定(~/.claude-spool — git 外の秘密層)</h2>
     ${(() => {
       const sp = S.spool || {};
@@ -1691,17 +1720,44 @@ function renderKanri(el) {
       ${S.git.status ? `<div style="margin-top:8px" class="note warn"><span class="tag">未コミット</span><code class="block" style="flex:1">${esc(S.git.status)}</code></div>`
         : '<div class="faint" style="margin-top:6px">作業ツリーはクリーンです。</div>'}
     </div>`;
+}
 
-  drawKitei($("#kiteiCard", el));
-  $("#syncText", el).value = S.sync_exclude.content;
-  attachLineNumbers($("#syncText", el), $("#syncGutter", el));
-  $("#syncSave", el).onclick = async () => {
-    try {
-      const r = await j("/api/save", { method: "POST", body: JSON.stringify(
-        { target: "sync_exclude", content: $("#syncText", el).value }) });
-      toast(`保存しました(${kb(r.bytes)}、.bak 退避済み)`);
-    } catch (e) { toast(`保存失敗: ${e.message}`, 5000); }
-  };
+/* ---------------- 逓送(夜間便の発着) ---------------- */
+
+function renderTeiso(el) {
+  // 便リプレイのタイマーは再描画・タブ切替で必ず止める(描画済みDOMは捨てられるため)
+  clearTimeout(drawReplay._timer);
+  const runs = N.batch_runs || [];
+  el.innerHTML = `
+    <div class="note info"><span class="tag">このタブ</span><span>NAS 夜間バッチ(夜間便)の発着記録です。crontab の登録内容、実行履歴(逓送簿)、回議の便リプレイをまとめます。判断そのもの(決裁待ち・後閲待ち)は「決裁・後閲」タブへ。</span></div>
+    <h2 class="section">NAS 夜間バッチ(crontab)</h2>
+    ${(() => {
+      const bc = N.batch_config;
+      return bc && bc.model
+        ? `<div class="note info"><span class="tag">モデル</span><span>バッチの claude -p は <span class="mono">${esc(bc.model)}</span> で実行(設定: <span class="mono">/volume2/claude-system/batch/config.json</span>。実際に使われたモデルは各 batch/*.log の claude-usage 行に model= で記録)。</span></div>`
+        : `<div class="note warn"><span class="tag">モデル未設定</span><span>NAS の batch/config.json が無いか model が空です。CLI デフォルトで動くため、デフォルト変更で夜間バッチのモデルが黙って変わります。</span></div>`;
+    })()}
+    <div class="card"><code class="block">${esc(S.crontab)}</code></div>
+
+    <h2 class="section">バッチ実行履歴(逓送簿。直近${runs.length}件)</h2>
+    <div class="note info"><span class="tag">読み方</span><span>時刻はUTC(JSTは+9時間)。ロック敗退や cron 起動失敗はここに row を残さず「時間が来ても行が増えない」形で現れます — その検知は文書事務概況タブの注意欄(未記録・成功が古い・滞留)が担当します。</span></div>
+    <div class="card"><table>
+      <tr><th>run</th><th>種別</th><th>開始</th><th>終了</th><th>状態</th><th style="text-align:right">turns処理</th><th style="text-align:right">例規行</th><th>メモ</th></tr>
+      ${runs.map((b) => `<tr>
+        <td class="num">${b.id}</td>
+        <td class="mono">${esc(batchKind(b.notes))}</td>
+        <td class="mono faint">${esc(String(b.started_at || "").slice(5, 16).replace("T", " "))}</td>
+        <td class="mono faint">${esc(String(b.finished_at || "").slice(5, 16).replace("T", " "))}</td>
+        <td><span class="chip ${b.status === "success" ? "ok" : b.status === "running" ? "" : "err"}">${esc(b.status)}</span></td>
+        <td class="num">${b.turns_processed ?? "·"}</td>
+        <td class="num">${b.index_lines ?? "·"}</td>
+        <td class="faint" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(b.notes || "")}">${esc(String(b.notes || ""))}</td></tr>`).join("")}
+    </table></div>
+
+    <h2 class="section">夜間便リプレイ</h2>
+    <div class="card" id="replayCard"></div>`;
+
+  drawReplay($("#replayCard", el));
 }
 
 /* ---------------- 収受簿(raw_payloads の受付台帳) ---------------- */
@@ -1715,10 +1771,9 @@ function shujuStatus(r) {
 }
 
 function renderCollect(el) {
-  const device = renderCollect._device || "";
   const kind = renderCollect._kind || "";
   el.innerHTML = `
-    <div class="note info"><span class="tag">このタブ</span><span>収受簿 — NAS が各端末から受け付けた記録(raw_payloads)の受付台帳です。収受番号・受付印(received_at)・差出端末・種別・処理状況を載せます。収受の除外設定や夜間バッチの状態は「監理」タブ、受け付けた記録の中身の検索は「現用文書」タブへ。</span></div>
+    <div class="note info"><span class="tag">このタブ</span><span>収受簿 — NAS が各端末から受け付けた記録(raw_payloads)の受付台帳です。収受番号・受付印(received_at)・差出端末・種別・処理状況を載せます。夜間バッチの実行状況は「逓送」タブ、受け付けた記録の中身の検索は「現用文書」タブへ。</span></div>
     <h2 class="section">端末別の収受状況(時刻はJST)</h2>
     <div class="card" id="shujuDev">読み込み中…</div>
     <h2 class="section">受付台帳(直近100件・受付印はJST)</h2>
@@ -1730,13 +1785,39 @@ function renderCollect(el) {
           `<option value="${v}"${kind === v ? " selected" : ""}>${l}</option>`).join("")}
       </select>
     </div>
-    <div class="card" id="shujuList">読み込み中…</div>`;
+    <div class="card" id="shujuList">読み込み中…</div>
 
-  $("#shujuKind", el).onchange = (e) => { renderCollect._kind = e.target.value; renderCollect(el); };
+    <h2 class="section">収集除外 sync-exclude.txt(全端末に配布・手動管理で安全に編集可)</h2>
+    <div class="note info"><span class="tag">仕組み</span><span>ここに載せた project_key・パスは収受(この台帳)そのものから除外されます(端末側 hook/sender・NAS 側 ingest の両方で効く)。</span></div>
+    <div class="card">
+      <div class="toolrow"><span class="faint">${esc(S.sync_exclude.path)}</span>
+        <span style="flex:1"></span><button class="btn mini" id="syncSave">保存</button></div>
+      <div class="editor-wrap">
+        <div class="editor-gutter" id="syncGutter" aria-hidden="true"></div>
+        <textarea class="editor" id="syncText" style="min-height:260px" spellcheck="false"></textarea>
+      </div>
+    </div>`;
 
-  (async () => {
+  $("#syncText", el).value = S.sync_exclude.content;
+  attachLineNumbers($("#syncText", el), $("#syncGutter", el));
+  $("#syncSave", el).onclick = async () => {
+    try {
+      const content = $("#syncText", el).value;
+      const r = await j("/api/save", { method: "POST", body: JSON.stringify(
+        { target: "sync_exclude", content }) });
+      S.sync_exclude.content = content;
+      S.sync_exclude.bytes = r.bytes;
+      toast(`保存しました(${kb(r.bytes)}、.bak 退避済み)`);
+    } catch (e) { toast(`保存失敗: ${e.message}`, 5000); }
+  };
+
+  // 受付台帳側だけを差し替える(絞り込み変更のたびにタブ全体を再描画すると
+  // 上の sync-exclude textarea の未保存の編集が失われるため)
+  async function loadShuju() {
+    const device = renderCollect._device || "";
+    const kd = renderCollect._kind || "";
     let data;
-    try { data = await j(`/api/shuju?device=${encodeURIComponent(device)}&kind=${encodeURIComponent(kind)}`); }
+    try { data = await j(`/api/shuju?device=${encodeURIComponent(device)}&kind=${encodeURIComponent(kd)}`); }
     catch (e) {
       $("#shujuDev", el).innerHTML = `<div class="note warn"><span class="tag">取得失敗</span><span>${esc(e.message)}</span></div>`;
       $("#shujuList", el).textContent = "";
@@ -1756,7 +1837,7 @@ function renderCollect(el) {
     const sel = $("#shujuDevice", el);
     sel.innerHTML = '<option value="">全端末</option>' + devs.map((d) =>
       `<option value="${esc(d.device)}"${device === d.device ? " selected" : ""}>${esc(d.device)}</option>`).join("");
-    sel.onchange = (e) => { renderCollect._device = e.target.value; renderCollect(el); };
+    sel.onchange = (e) => { renderCollect._device = e.target.value; loadShuju(); };
 
     const rows = data.rows || [];
     $("#shujuList", el).innerHTML = rows.length ? `<table>
@@ -1770,7 +1851,10 @@ function renderCollect(el) {
         <td>${shujuStatus(r)}</td>
       </tr>`).join("")}
     </table>` : '<span class="faint">該当する収受はありません。</span>';
-  })();
+  }
+
+  $("#shujuKind", el).onchange = (e) => { renderCollect._kind = e.target.value; loadShuju(); };
+  loadShuju();
 }
 
 function staleServer(el) {
@@ -2006,9 +2090,9 @@ function renderUsage(el) {
 /* ---------------- router ---------------- */
 
 const RENDER = { overview: renderOverview, context: renderContext, facts: renderFacts,
-  shelf: renderShelf, kanribo: renderKanribo, skills: renderSkills, hooks: renderHooks,
-  routing: renderRouting, messages: renderMessages, collect: renderCollect,
-  usage: renderUsage, kanri: renderKanri };
+  kessai: renderKessai, shelf: renderShelf, kanribo: renderKanribo, skills: renderSkills,
+  hooks: renderHooks, routing: renderRouting, messages: renderMessages, collect: renderCollect,
+  usage: renderUsage, teiso: renderTeiso, kanri: renderKanri };
 
 function route() {
   const tab = (location.hash || "#overview").slice(1);

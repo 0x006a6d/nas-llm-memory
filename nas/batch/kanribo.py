@@ -413,6 +413,10 @@ def nendo_report_sql(fy: int) -> str:
         f"'ikan', (SELECT count(*) FROM record_files "
         f"         WHERE fiscal_year = {int(fy)} AND state = 'ikan_zumi'), "
         f"'drafts', (SELECT count(*) FROM drafts WHERE fiscal_year = {int(fy)}), "
+        # ここの miketsu は「決裁待ち(pending_decision)全件」の件数(応答不一致による
+        # 未決繰越だけでなく、上申されて人間の決裁を待っている件も含む)。dashboard の
+        # shelf_list miketsu フィルタ(審査中 pending_review も含む「決裁が終わっていない
+        # 文書」全般)とは条件が異なる。混同しないこと
         f"'miketsu', (SELECT count(*) FROM drafts WHERE state = 'pending_decision'), "
         f"'kouetsu_machi', (SELECT count(*) FROM drafts WHERE seen_state = 'pending' "
         f"                  AND state IN ('executed','rejected','approved')), "

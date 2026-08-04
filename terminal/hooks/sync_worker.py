@@ -49,7 +49,7 @@ def find_git():
 
 
 def record_sync(ok: bool, detail: str = ""):
-    """設定同期の成否を残す(dashboardの収受簿タブが「何日失敗しているか」を出す)。"""
+    """設定同期の成否を残す(dashboardの文書事務概況タブの注意欄・監理タブが「何日失敗しているか」を出す)。"""
     try:
         st = json.loads(SYNC_STATE.read_text(encoding="utf-8")) if SYNC_STATE.is_file() else {}
     except Exception:

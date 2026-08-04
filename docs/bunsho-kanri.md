@@ -48,7 +48,7 @@ facts の登載、index の改定、skill の登載、廃棄、移管は、い�
 決裁には二つの区分がある。**決裁したら施行する** — 施行前の承認を後閲と呼ばない。
 
 - **LLM決裁** (senketsu/bucho) — facts 登載・index 改定・ルーチンの廃棄/移管。専決 (軽易な案件は審査で決する) と上申 (置換・撤回・矛盾の疑いは部長へ) がある
-- **人間決裁** (human) — **skill の登載**と**生ログ (turns) の廃棄**。審査 (課長) の上申で止まり、dashboard の書庫「決裁待ち」で人間が決裁 (問題があればメモ付きで差戻) する。決裁と同時に封緘し、翌晩のバッチが施行する。人間が自ら決裁した文書に後閲は無い。差戻された文書は審査へ戻り (remanded_to_reviewer)、翌晩、審査がメモを踏まえて補正・再上申または廃案にする (人間決裁事項なので審査の専決で人間を飛ばすことはしない)
+- **人間決裁** (human) — **skill の登載**と**生ログ (turns) の廃棄**。審査 (課長) の上申で止まり、dashboard の決裁・後閲タブ「決裁待ち・未決」で人間が決裁 (問題があればメモ付きで差戻) する。決裁と同時に封緘し、翌晩のバッチが施行する。人間が自ら決裁した文書に後閲は無い。差戻された文書は審査へ戻り (remanded_to_reviewer)、翌晩、審査がメモを踏まえて補正・再上申または廃案にする (人間決裁事項なので審査の専決で人間を飛ばすことはしない)
 - **未決繰越** — LLM の決裁が付かない fact 案件は承認も否決もせず、翌晩に再審理する。人間決裁待ちの文書は期限なく待つ
 - **後閲** — **人間が関与せずに施行された文書**を人間が事後確認する。妥当なら後閲印、問題があればメモ付きで差し戻し、翌晩に再審理される
 
@@ -69,7 +69,7 @@ facts の登載、index の改定、skill の登載、廃棄、移管は、い�
 3. **決裁** — 部長モデルが承認または否決する (国の制度で内閣総理大臣の同意に当たる位置づけ)
 4. **施行** — 規程の施行ゲートによる:
    - `sokujiko` — LLM の決裁で即施行する (raw_payloads・auto_memory・messages・batch_runs・lending_log と移管)。施行後に後閲へ回る
-   - `kessai` — **人間の決裁が条件** (生ログ turns)。審査の上申で止まり、書庫「決裁待ち」で人間が決裁して初めて施行される。決裁は封緘・`seen_at`・回議録 (actor='human', action='kessai_ok') に残り、翌晩の `process_bunsho_queue()` が施行する
+   - `kessai` — **人間の決裁が条件** (生ログ turns)。審査の上申で止まり、決裁・後閲タブ「決裁待ち・未決」で人間が決裁して初めて施行される。決裁は封緘・`seen_at`・回議録 (actor='human', action='kessai_ok') に残り、翌晩の `process_bunsho_queue()` が施行する
 5. **施行前の確認** — 当日の pg_dump が無ければ施行しない
 6. **廃棄・移管の起票と施行のスイッチ** — `config.json` の `bunsho.enabled`。facts 登載の移行スイッチ (`ringi.enabled`) とは独立で、整理・満了検出・点検は常時、起票・施行は `bunsho.enabled` が真のときだけ動く
 
@@ -110,7 +110,7 @@ zcat /volume2/claude-system/archive/2026/kessai-doc_proj_2026.jsonl.gz | head -1
    UPDATE retention_rules SET enabled = true WHERE category = 'shuju-raw';
    ```
 4. 翌晩の整理で管理簿にファイルが並ぶ。dashboard の「管理簿」タブで分類・件数・満了日を確認する
-5. 満了したファイルが出たら廃棄伺いが起票される。書庫で内容を確認する。`kessai` ゲートの分類は人間の決裁 (第4章) を経て初めて施行される
+5. 満了したファイルが出たら廃棄伺いが起票される。決裁・後閲タブで内容を確認する。`kessai` ゲートの分類は人間の決裁 (第4章) を経て初めて施行される
 6. 実績を見てから次の分類を有効にする。順序の目安: shuju-raw → kanri-shakuran → unyou-run → renraku-msg → shuju-memo → shuju-turns → kessai-doc
 
 ## 第10章 原本保管 (改ざん防止)
@@ -128,7 +128,7 @@ zcat /volume2/claude-system/archive/2026/kessai-doc_proj_2026.jsonl.gz | head -1
 
 | action | channel | 意味 |
 |---|---|---|
-| etsuran | dashboard | 書庫で文書原本を開いた (同一文書は1日1行) |
+| etsuran | dashboard | 決裁・後閲/書庫で文書原本を開いた (同一文書は1日1行) |
 | kensaku | search | 端末からの全文検索 (1クエリ1行。query とヒット id を残す) |
 | kashidashi / henkyaku | archive | 公文書館からの取り寄せ (第12章) |
 | kouran | inbox | 端末が申し送り (messages) を受領した (ingest が配信時に記帳) |

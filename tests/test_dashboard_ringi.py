@@ -69,10 +69,6 @@ class TestShelfOpTransitions(unittest.TestCase):
                 server.shelf_op("kouetsu", 5, "")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestShelfFilters(unittest.TestCase):
     """demo判定と本番SQLの条件を揃える(見え方が環境で変わらないように)。"""
 
@@ -83,6 +79,7 @@ class TestShelfFilters(unittest.TestCase):
         {"id": 4, "kind": "fact", "state": "pending_decision", "seen_state": "pending"},
         {"id": 5, "kind": "fact", "state": "reexamine", "seen_state": "remanded"},
         {"id": 6, "kind": "skill", "state": "remanded_to_reviewer", "seen_state": "pending"},
+        {"id": 7, "kind": "fact", "state": "pending_review", "seen_state": "pending"},
     ]
 
     def _demo_ids(self, filt):
@@ -97,12 +94,15 @@ class TestShelfFilters(unittest.TestCase):
             server.shelf_list(filt, None)
         return sq.call_args[0][0]
 
-    def test_miketsu_is_pending_decision(self):
-        self.assertEqual(self._demo_ids("miketsu"), [4])
-        self.assertIn("state = 'pending_decision'", self._sql_cond("miketsu"))
+    def test_miketsu_includes_pending_review_and_pending_decision(self):
+        # 未決 = 決裁が終わっていない文書。審査中(pending_review)を非クリックにすると
+        # そこで滞留する文書が一覧から到達不能になるため、miketsu に含める
+        self.assertEqual(self._demo_ids("miketsu"), [4, 7])
+        self.assertIn("state in ('pending_review','pending_decision')",
+                      self._sql_cond("miketsu"))
 
     def test_pending_excludes_undecided_docs(self):
-        # 未決(pending_decision)は完結していないので後閲待ちに出さない
+        # 未決(pending_review/pending_decision)は完結していないので後閲待ちに出さない
         self.assertEqual(self._demo_ids("pending"), [2, 3])
         self.assertIn("state in ('executed','rejected','approved')",
                       self._sql_cond("pending"))
@@ -112,6 +112,155 @@ class TestShelfFilters(unittest.TestCase):
         self.assertEqual(self._demo_ids("remanded"), [5, 6])
         self.assertIn("state in ('reexamine','remanded_to_reviewer','remanded_to_drafter')",
                       self._sql_cond("remanded"))
+
+
+class TestShelfKanketsuFilter(unittest.TestCase):
+    """書庫(完結文書庫)の一覧条件。決裁待ち・審査中・後閲待ちを含まない完結文書のみ。
+
+    差し戻しによる終端廃案(rejected+seen_state='remanded')もここに含める:
+    承認前に差し戻された rejected は処理不能な終端であり、差し戻し・再審理中
+    キューに残しても誰も処理できないため、完結扱いで書庫へ送る。
+    """
+
+    ROWS = [
+        {"id": 1, "kind": "fact", "state": "executed", "seen_state": "seen"},
+        {"id": 2, "kind": "fact", "state": "executed", "seen_state": "pending"},
+        {"id": 3, "kind": "skill", "state": "rejected", "seen_state": "seen"},
+        {"id": 4, "kind": "fact", "state": "pending_decision", "seen_state": "pending"},
+        {"id": 5, "kind": "fact", "state": "approved", "seen_state": "seen"},
+        {"id": 6, "kind": "skill", "state": "reexamine", "seen_state": "remanded"},
+        {"id": 7, "kind": "skill", "state": "rejected", "seen_state": "remanded"},
+    ]
+
+    def _demo_ids(self, kind=None):
+        rows = [dict(r, doc_no="2026-0001", fiscal_year=2026, seq=1) for r in self.ROWS]
+        with mock.patch.object(server, "DEMO", True), \
+             mock.patch.object(server, "load_json", return_value={"list": rows}):
+            return [r["id"] for r in server.shelf_list("kanketsu", kind)]
+
+    def _sql_cond(self, kind=None):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "sql_json", return_value=[]) as sq:
+            server.shelf_list("kanketsu", kind)
+        return sq.call_args[0][0]
+
+    def test_only_executed_and_rejected_not_pending(self):
+        # approved(施行前)・pending_decision(未決)・reexamine(差し戻し中)は出さない
+        self.assertEqual(self._demo_ids(), [1, 3, 7])
+        cond = self._sql_cond()
+        self.assertIn("state in ('executed','rejected')", cond)
+        self.assertIn("seen_state <> 'pending'", cond)
+
+    def test_seen_state_pending_excluded(self):
+        # 施行済でも後閲待ち(seen_state='pending')は完結していないので出さない
+        self.assertNotIn(2, self._demo_ids())
+
+    def test_terminal_rejected_remanded_included(self):
+        # 終端廃案(rejected+remanded)は完結として書庫に出す
+        self.assertIn(7, self._demo_ids())
+
+    def test_kind_filter_stacks(self):
+        self.assertEqual(self._demo_ids("skill"), [3, 7])
+        self.assertIn("kind = $dq$skill$dq$", self._sql_cond("skill"))
+
+
+class TestShelfRemandedExcludesTerminalRejected(unittest.TestCase):
+    """差し戻し・再審理中(remanded)は処理可能な文書だけを残す。終端廃案
+    (rejected+seen_state='remanded')は書庫(kanketsu)側の担当なので出さない。"""
+
+    ROWS = [
+        {"id": 1, "kind": "fact", "state": "reexamine", "seen_state": "remanded"},
+        {"id": 2, "kind": "skill", "state": "rejected", "seen_state": "remanded"},
+        {"id": 3, "kind": "fact", "state": "remanded_to_reviewer", "seen_state": "pending"},
+    ]
+
+    def _demo_ids(self):
+        rows = [dict(r, doc_no="2026-0001", fiscal_year=2026, seq=1) for r in self.ROWS]
+        with mock.patch.object(server, "DEMO", True), \
+             mock.patch.object(server, "load_json", return_value={"list": rows}):
+            return [r["id"] for r in server.shelf_list("remanded", None)]
+
+    def _sql_cond(self):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "sql_json", return_value=[]) as sq:
+            server.shelf_list("remanded", None)
+        return sq.call_args[0][0]
+
+    def test_terminal_rejected_excluded(self):
+        ids = self._demo_ids()
+        self.assertEqual(ids, [1, 3])
+        self.assertNotIn(2, ids)
+        self.assertIn("state <> 'rejected'", self._sql_cond())
+
+
+class TestShelfKiketsuFilter(unittest.TestCase):
+    """決裁・後閲タブの「決裁済・施行待ち」。決裁は付いたが翌晩の施行をまだ
+    待っている文書(state='approved')。seen_state は問わない(人間が自ら決裁した
+    直後はseen、LLMが決裁した直後はpendingであり、どちらも施行待ちに変わりない)。
+    LLM決裁直後(seen_state='pending')は「後閲待ち」(pending)とも重複して出る
+    (skill の施行条件は人間の後閲印であり、両方に見えるのは仕様どおり — 4裁定)。"""
+
+    ROWS = [
+        {"id": 1, "kind": "fact", "state": "approved", "seen_state": "pending"},
+        {"id": 2, "kind": "skill", "state": "approved", "seen_state": "seen"},
+        {"id": 3, "kind": "fact", "state": "executed", "seen_state": "seen"},
+        {"id": 4, "kind": "fact", "state": "pending_decision", "seen_state": "pending"},
+    ]
+
+    def _demo_ids(self, kind=None):
+        rows = [dict(r, doc_no="2026-0001", fiscal_year=2026, seq=1) for r in self.ROWS]
+        with mock.patch.object(server, "DEMO", True), \
+             mock.patch.object(server, "load_json", return_value={"list": rows}):
+            return [r["id"] for r in server.shelf_list("kiketsu", kind)]
+
+    def _sql_cond(self, kind=None):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "sql_json", return_value=[]) as sq:
+            server.shelf_list("kiketsu", kind)
+        return sq.call_args[0][0]
+
+    def test_only_approved_regardless_of_seen_state(self):
+        self.assertEqual(self._demo_ids(), [1, 2])
+        self.assertIn("state = 'approved'", self._sql_cond())
+
+    def test_kind_filter_stacks(self):
+        self.assertEqual(self._demo_ids("skill"), [2])
+        self.assertIn("kind = $dq$skill$dq$", self._sql_cond("skill"))
+
+
+class TestShelfApprovedSeenExclusivity(unittest.TestCase):
+    """approved+seen_state='seen'(人間が自ら決裁した直後、翌晩の施行待ち)は
+    kiketsu にだけ出て、kanketsu/pending/miketsu には出ないことを表明する
+    (施行待ちの文書が一覧から到達不能にならないことの回帰テスト)。"""
+
+    ROW = {"id": 9, "kind": "skill", "state": "approved", "seen_state": "seen"}
+
+    def _demo_ids(self, filt):
+        row = dict(self.ROW, doc_no="2026-0001", fiscal_year=2026, seq=1)
+        with mock.patch.object(server, "DEMO", True), \
+             mock.patch.object(server, "load_json", return_value={"list": [row]}):
+            return [r["id"] for r in server.shelf_list(filt, None)]
+
+    def test_visible_only_in_kiketsu(self):
+        self.assertEqual(self._demo_ids("kiketsu"), [9])
+        self.assertEqual(self._demo_ids("kanketsu"), [])
+        self.assertEqual(self._demo_ids("pending"), [])
+        self.assertEqual(self._demo_ids("miketsu"), [])
+
+
+class TestShelfMiketsuCount(unittest.TestCase):
+    """概況の未決通知件数(shelf_miketsu_count)は shelf_list の miketsu フィルタと
+    同条件であること(通知件数と一覧件数が食い違わないように)。"""
+
+    def test_condition_matches_miketsu_filter(self):
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "run_sql", return_value="0") as rs:
+            server.shelf_miketsu_count()
+        cond = _norm(rs.call_args[0][0]).split(" where ", 1)[1].rstrip(";")
+        with mock.patch.object(server, "DEMO", False), \
+             mock.patch.object(server, "sql_json", return_value=[]) as sq:
+            server.shelf_list("miketsu", None)
+        self.assertIn(cond, _norm(sq.call_args[0][0]))
 
 
 class TestKanriboFilters(unittest.TestCase):
@@ -200,24 +349,26 @@ class TestShelfCounts(unittest.TestCase):
         return _norm(rs.call_args[0][0]), out
 
     def test_all_states_counted(self):
-        sql, out = self._sql("|".join(["0"] * 10))
+        sql, out = self._sql("|".join(["0"] * 11))
         for s in server.SHELF_STATES:
             self.assertIn(f"count(*) filter (where state='{s}')", sql)
-        self.assertEqual(set(out), set(server.SHELF_STATES) | {"kouetsu_pending", "total"})
+        self.assertEqual(set(out), set(server.SHELF_STATES)
+                          | {"kouetsu_pending", "executed_pending", "total"})
 
     def test_kouetsu_condition_matches_pending_count(self):
         with mock.patch.object(server, "DEMO", False), \
              mock.patch.object(server, "run_sql", return_value="0") as rs:
             server.shelf_pending_count()
         cond = _norm(rs.call_args[0][0]).split(" where ", 1)[1].rstrip(";")
-        self.assertIn(cond, self._sql("|".join(["0"] * 10))[0])
+        self.assertIn(cond, self._sql("|".join(["0"] * 11))[0])
 
     def test_values_map_in_order(self):
-        _, out = self._sql("1|2|3|4|5|6|7|8|9|10")
+        _, out = self._sql("1|2|3|4|5|6|7|8|9|10|11")
         self.assertEqual(out["pending_review"], 1)
         self.assertEqual(out["reexamine"], 8)
         self.assertEqual(out["kouetsu_pending"], 9)
-        self.assertEqual(out["total"], 10)
+        self.assertEqual(out["executed_pending"], 10)
+        self.assertEqual(out["total"], 11)
 
     def test_demo_counts_match_rows(self):
         with mock.patch.object(server, "DEMO", True), \
@@ -230,6 +381,8 @@ class TestShelfCounts(unittest.TestCase):
         self.assertEqual(out["pending_review"], 0)
         # 後閲待ちは shelf_list("pending") と同じ集合(id 2,3)
         self.assertEqual(out["kouetsu_pending"], 2)
+        # 「施行」停留所専用: 施行済かつ後閲待ちなのは id2 のみ(id1 は seen)
+        self.assertEqual(out["executed_pending"], 1)
         self.assertEqual(out["total"], 5)
 
     def test_counts_none_when_schema_absent(self):
@@ -356,3 +509,7 @@ class TestShelfReplay(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     server.shelf_replay(bad)
         self.assertEqual(sq.call_count, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

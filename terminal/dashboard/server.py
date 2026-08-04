@@ -664,7 +664,7 @@ def _spool_config():
 
 
 def spool_state():
-    """~/.claude-spool の実接続設定と送信キューの状態(収受簿タブ表示用)。
+    """~/.claude-spool の実接続設定と送信キューの状態(監理タブ表示用)。
 
     api_token は生値を返さない。端末間の設定照合ができるよう sha256 指紋の先頭だけ返す
     (TLS 証明書も同様。全端末で同じ指紋になっていれば同じ設定を向いている)。
@@ -1101,9 +1101,25 @@ SHELF_STATES = ("pending_review", "remanded_to_drafter", "pending_decision",
 
 
 def shelf_list(filt, kind, state=None):
-    """drafts一覧。filt: pending(後閲待ち)|remanded(差し戻し中)|miketsu(未決)|all。
+    """drafts一覧。filt: pending(後閲待ち)|remanded(差し戻し中)|miketsu(未決)|
 
-    state は SHELF_STATES のいずれかで、filt に重ねて絞り込む。
+    kiketsu(既決)|kanketsu(完結)|all。state は SHELF_STATES のいずれかで、
+    filt に重ねて絞り込む(現在の UI はどのボタン・停留所クリックからも state を
+    送らなくなったが、API 互換のため残す。任意の state 絞り込みはこのパラメータでのみ可能)。
+
+    miketsu(未決)= 決裁が終わっていない文書。審査中(pending_review)も含める
+    (文書事務上「決裁待ち・未決」の名に対して正確なのはここまでで、審査停留所を
+    非クリックにすると pending_review の文書が一覧から到達不能になるため)。
+    kiketsu(既決)は決裁・後閲タブ専用: 人間または LLM が決裁した直後で、
+    まだ施行(翌晩のバッチ)を待っている文書(state='approved')。pending(後閲待ち)
+    とは排他ではない: LLM決裁直後(seen_state='pending')は両方に出る
+    (skill の施行条件は人間の後閲印なので、後閲待ちと既決・施行待ちの両方に
+    見えるのは仕様どおり)。
+    kanketsu(完結)は書庫タブ専用: 施行済・廃案で、かつ後閲(または人間の決裁時の
+    自動後閲、または差し戻しによる終端廃案)まで済んでいる、人間の操作が
+    残っていない文書だけを返す。廃案(rejected)は承認前に差し戻された時点で
+    処理不能な終端なので、差し戻し・再審理中キューではなくここに送る。
+    決裁待ち・審査中・後閲待ちの文書は出さない(それらは決裁・後閲タブが担当)。
     """
     if state and state not in SHELF_STATES:
         raise ValueError(f"unknown state: {state}")
@@ -1115,11 +1131,16 @@ def shelf_list(filt, kind, state=None):
             rows = [r for r in rows if r.get("seen_state") == "pending"
                     and r.get("state") in ("executed", "rejected", "approved")]
         elif filt == "remanded":
-            rows = [r for r in rows if r.get("seen_state") == "remanded"
-                    or r.get("state") in ("reexamine", "remanded_to_reviewer",
-                                          "remanded_to_drafter")]
+            rows = [r for r in rows if r.get("state") in
+                    ("reexamine", "remanded_to_reviewer", "remanded_to_drafter")
+                    or (r.get("seen_state") == "remanded" and r.get("state") != "rejected")]
         elif filt == "miketsu":
-            rows = [r for r in rows if r.get("state") == "pending_decision"]
+            rows = [r for r in rows if r.get("state") in ("pending_review", "pending_decision")]
+        elif filt == "kiketsu":
+            rows = [r for r in rows if r.get("state") == "approved"]
+        elif filt == "kanketsu":
+            rows = [r for r in rows if r.get("state") in ("executed", "rejected")
+                    and r.get("seen_state") != "pending"]
         if kind:
             rows = [r for r in rows if r.get("kind") == kind]
         if state:
@@ -1130,11 +1151,20 @@ def shelf_list(filt, kind, state=None):
         # 後閲対象 = 完結して人間がまだ見ていない文書(施行済み・廃案・後閲待ちskill)
         cond = "seen_state = 'pending' and state in ('executed','rejected','approved')"
     elif filt == "remanded":
-        cond = ("seen_state = 'remanded' or state in "
-                "('reexamine','remanded_to_reviewer','remanded_to_drafter')")
+        # 終端廃案(rejected)は差し戻し・再審理中には出さない(kanketsuが担当)。
+        # それ以外の差し戻し(reexamine等の明示state、または一般のseen_state='remanded')は残す
+        cond = ("state in ('reexamine','remanded_to_reviewer','remanded_to_drafter') "
+                "or (seen_state = 'remanded' and state <> 'rejected')")
     elif filt == "miketsu":
-        # 未決 = 決裁が付かず翌晩へ繰り越し中の文書(承認でも廃案でもない)
-        cond = "state = 'pending_decision'"
+        # 未決 = 決裁が終わっていない文書(審査中・決裁待ちの両方)
+        cond = "state in ('pending_review','pending_decision')"
+    elif filt == "kiketsu":
+        # 既決・施行待ち = 決裁は付いたがまだ翌晩の施行を経ていない文書
+        cond = "state = 'approved'"
+    elif filt == "kanketsu":
+        # 完結 = 施行済・廃案で、後閲待ち(seen_state='pending')ではないもの。
+        # rejected+seen_state='remanded'(差し戻しによる終端廃案)もここに含む
+        cond = "state in ('executed','rejected') and seen_state <> 'pending'"
     if kind:
         cond = f"({cond}) and kind = {dollar_quote(kind)}"
     if state:
@@ -1454,8 +1484,13 @@ def shelf_pending_count():
 
 
 def shelf_counts():
-    """書庫の状態別文書数(停留所マップ用)。012未適用ならNone。"""
-    keys = SHELF_STATES + ("kouetsu_pending", "total")
+    """書庫の状態別文書数(停留所マップ用)。012未適用ならNone。
+
+    executed_pending は「施行」停留所専用: 施行済みでまだ後閲されていない件数
+    (state='executed' かつ seen_state='pending')。executed(全施行済み。後閲済みも
+    含む)とは別で、こちらは常時増え続けるだけの数字になるため停留所の表示には使わない。
+    """
+    keys = SHELF_STATES + ("kouetsu_pending", "executed_pending", "total")
     if DEMO:
         rows = load_json(DEMO_DIR / "shelf.json", {}).get("list", [])
         out = {s: sum(1 for r in rows if r.get("state") == s) for s in SHELF_STATES}
@@ -1463,6 +1498,9 @@ def shelf_counts():
         out["kouetsu_pending"] = sum(
             1 for r in rows if r.get("seen_state") == "pending"
             and r.get("state") in ("executed", "rejected", "approved"))
+        out["executed_pending"] = sum(
+            1 for r in rows
+            if r.get("state") == "executed" and r.get("seen_state") == "pending")
         out["total"] = len(rows)
         return out
     try:
@@ -1471,6 +1509,7 @@ def shelf_counts():
             + "".join(f"count(*) filter (where state='{s}'), " for s in SHELF_STATES)
             + "count(*) filter (where seen_state='pending' "
               "  and state in ('executed','rejected','approved')), "
+              "count(*) filter (where state='executed' and seen_state='pending'), "
               "count(*) from drafts;")
         vals = (out or "").split("|")
         if len(vals) != len(keys):
@@ -1481,9 +1520,11 @@ def shelf_counts():
 
 
 def shelf_miketsu_count():
-    """未決(決裁が付かず繰越中)の文書数。012未適用ならNone。"""
+    """未決(決裁が終わっていない)の文書数。shelf_list の miketsu フィルタと同条件
+    (審査中 pending_review も含む)。012未適用ならNone。"""
     try:
-        out = run_sql("select count(*) from drafts where state='pending_decision';")
+        out = run_sql(
+            "select count(*) from drafts where state in ('pending_review','pending_decision');")
         return int(out or 0)
     except Exception:  # noqa: BLE001 — drafts未適用環境
         return None

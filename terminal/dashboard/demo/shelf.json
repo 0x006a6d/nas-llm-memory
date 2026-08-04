@@ -1,6 +1,70 @@
 {
  "list": [
   {
+   "id": 8,
+   "doc_no": "2026-0008",
+   "fiscal_year": 2026,
+   "seq": 8,
+   "kind": "fact",
+   "project_key": "demo-project",
+   "title": "プロジェクト demo-project に係る事実の登載について(伺い)",
+   "state": "reexamine",
+   "decision_class": "bucho",
+   "seen_state": "remanded",
+   "created_at": "2026-07-25T03:03:00",
+   "decided_at": "2026-07-25T03:03:10",
+   "executed_at": "2026-07-25T03:03:15",
+   "related_doc": null
+  },
+  {
+   "id": 7,
+   "doc_no": "2026-0007",
+   "fiscal_year": 2026,
+   "seq": 7,
+   "kind": "ikan",
+   "project_key": "general",
+   "title": "行政文書ファイル「決裁文書 demo-project 令和7年度」の移管について(伺い)",
+   "state": "approved",
+   "decision_class": "bucho",
+   "seen_state": "pending",
+   "created_at": "2026-07-29T03:10:00",
+   "decided_at": "2026-07-29T03:10:20",
+   "executed_at": null,
+   "related_doc": null
+  },
+  {
+   "id": 6,
+   "doc_no": "2026-0006",
+   "fiscal_year": 2026,
+   "seq": 6,
+   "kind": "skill",
+   "project_key": "general",
+   "title": "スキル「demo-old-candidate」の登載について(伺い)",
+   "state": "rejected",
+   "decision_class": "human",
+   "seen_state": "remanded",
+   "created_at": "2026-07-26T03:05:00",
+   "decided_at": "2026-07-26T03:06:00",
+   "executed_at": null,
+   "related_doc": null
+  },
+  {
+   "id": 5,
+   "doc_no": "2026-0005",
+   "fiscal_year": 2026,
+   "seq": 5,
+   "kind": "fact",
+   "project_key": "demo-project",
+   "title": "プロジェクト demo-project に係る事実の登載について(伺い)",
+   "state": "pending_review",
+   "decision_class": null,
+   "seen_state": "pending",
+   "created_at": "2026-07-29T03:02:00",
+   "decided_at": null,
+   "executed_at": null,
+   "related_doc": null
+  },
+  {
    "id": 4,
    "doc_no": "2026-0004",
    "fiscal_year": 2026,
@@ -317,6 +381,216 @@
     }
    ],
    "facts": [],
+   "related": []
+  },
+  "5": {
+   "id": 5,
+   "doc_no": "2026-0005",
+   "fiscal_year": 2026,
+   "seq": 5,
+   "kind": "fact",
+   "project_key": "demo-project",
+   "title": "プロジェクト demo-project に係る事実の登載について(伺い)",
+   "proposal": "標記について、下記のとおり事実層(facts)に登載してよろしいか。\n\n記\n\n1. 新規登載 1件(別記第1)\n\n別記第1(新規登載)\n 1. isnet-anime で背景切り抜きができる",
+   "payload": {
+    "candidates": []
+   },
+   "state": "pending_review",
+   "decision_class": null,
+   "seen_state": "pending",
+   "created_at": "2026-07-29T03:02:00",
+   "decided_at": null,
+   "executed_at": null,
+   "related_doc": null,
+   "log": [
+    {
+     "id": 50,
+     "actor": "kian:claude-haiku-4-5-20251001",
+     "action": "kian",
+     "memo": null,
+     "created_at": "2026-07-29T03:02:00",
+     "created_by": "demo-seed"
+    }
+   ],
+   "facts": [],
+   "related": []
+  },
+  "6": {
+   "id": 6,
+   "doc_no": "2026-0006",
+   "fiscal_year": 2026,
+   "seq": 6,
+   "kind": "skill",
+   "project_key": "general",
+   "title": "スキル「demo-old-candidate」の登載について(伺い)",
+   "proposal": "標記について、下記のスキルを skills 本体に登載してよろしいか。\n\n記\n\n1. スキル「demo-old-candidate」を skills 本体へ登載する(検出2回)\n2. SKILL.md案は別記第1のとおり\n3. 施行(全端末への配布)は人間の決裁を条件とする\n\n別記第1(SKILL.md案)\n# 旧手順\n1. 何かする",
+   "payload": {
+    "name": "demo-old-candidate",
+    "count": 2
+   },
+   "state": "rejected",
+   "decision_class": "human",
+   "seen_state": "remanded",
+   "created_at": "2026-07-26T03:05:00",
+   "decided_at": "2026-07-26T03:06:00",
+   "executed_at": null,
+   "related_doc": null,
+   "log": [
+    {
+     "id": 60,
+     "actor": "kian:claude-haiku-4-5-20251001",
+     "action": "kian",
+     "memo": null,
+     "created_at": "2026-07-26T03:05:00",
+     "created_by": "demo-seed"
+    },
+    {
+     "id": 61,
+     "actor": "shinsa:claude-sonnet-5",
+     "action": "joshin",
+     "memo": "既存スキルとの重複疑いのため上申",
+     "created_at": "2026-07-26T03:05:30",
+     "created_by": "demo-seed"
+    },
+    {
+     "id": 62,
+     "actor": "human",
+     "action": "kessai_ok",
+     "memo": null,
+     "created_at": "2026-07-26T03:06:00",
+     "created_by": "dashboard-20260726"
+    },
+    {
+     "id": 63,
+     "actor": "human",
+     "action": "sashimodoshi",
+     "memo": "よく見たら既存skillと重複していた。廃案でよい",
+     "created_at": "2026-07-26T09:00:00",
+     "created_by": "dashboard-20260726"
+    }
+   ],
+   "facts": [],
+   "related": []
+  },
+  "7": {
+   "id": 7,
+   "doc_no": "2026-0007",
+   "fiscal_year": 2026,
+   "seq": 7,
+   "kind": "ikan",
+   "project_key": "general",
+   "title": "行政文書ファイル「決裁文書 demo-project 令和7年度」の移管について(伺い)",
+   "proposal": "標記について、下記のファイルを移管してよろしいか。\n\n記\n\n1. 移管先 archive/2026/kessai-doc_demo-project_2026.jsonl.gz(別記第1)\n\n別記第1\n 件数 12件 / sha256 は施行時に確定",
+   "payload": {
+    "file_id": 900,
+    "name": "決裁文書 demo-project 令和7年度"
+   },
+   "state": "approved",
+   "decision_class": "bucho",
+   "seen_state": "pending",
+   "created_at": "2026-07-29T03:10:00",
+   "decided_at": "2026-07-29T03:10:20",
+   "executed_at": null,
+   "related_doc": null,
+   "log": [
+    {
+     "id": 70,
+     "actor": "kian:claude-haiku-4-5-20251001",
+     "action": "kian",
+     "memo": null,
+     "created_at": "2026-07-29T03:10:00",
+     "created_by": "demo-seed"
+    },
+    {
+     "id": 71,
+     "actor": "shinsa:claude-sonnet-5",
+     "action": "joshin",
+     "memo": "保存期間満了。歴史的価値の判断のため上申",
+     "created_at": "2026-07-29T03:10:10",
+     "created_by": "demo-seed"
+    },
+    {
+     "id": 72,
+     "actor": "kessai:claude-opus-4-8",
+     "action": "kessai_ok",
+     "memo": null,
+     "created_at": "2026-07-29T03:10:20",
+     "created_by": "demo-seed"
+    }
+   ],
+   "facts": [],
+   "related": []
+  },
+  "8": {
+   "id": 8,
+   "doc_no": "2026-0008",
+   "fiscal_year": 2026,
+   "seq": 8,
+   "kind": "fact",
+   "project_key": "demo-project",
+   "title": "プロジェクト demo-project に係る事実の登載について(伺い)",
+   "proposal": "標記について、下記のとおり事実層(facts)に登載してよろしいか。\n\n記\n\n1. 新規登載 1件(別記第1)\n\n別記第1(新規登載)\n 1. Wan 768×1152×37fの生成は約4.5時間かかる",
+   "payload": {
+    "candidates": []
+   },
+   "state": "reexamine",
+   "decision_class": "bucho",
+   "seen_state": "remanded",
+   "created_at": "2026-07-25T03:03:00",
+   "decided_at": "2026-07-25T03:03:10",
+   "executed_at": "2026-07-25T03:03:15",
+   "related_doc": null,
+   "log": [
+    {
+     "id": 80,
+     "actor": "kian:claude-haiku-4-5-20251001",
+     "action": "kian",
+     "memo": null,
+     "created_at": "2026-07-25T03:03:00",
+     "created_by": "demo-seed"
+    },
+    {
+     "id": 81,
+     "actor": "shinsa:claude-sonnet-5",
+     "action": "joshin",
+     "memo": "新規事実のため上申",
+     "created_at": "2026-07-25T03:03:05",
+     "created_by": "demo-seed"
+    },
+    {
+     "id": 82,
+     "actor": "kessai:claude-opus-4-8",
+     "action": "kessai_ok",
+     "memo": null,
+     "created_at": "2026-07-25T03:03:10",
+     "created_by": "demo-seed"
+    },
+    {
+     "id": 83,
+     "actor": "system",
+     "action": "shiko",
+     "memo": "facts登載1件 登載外0件",
+     "created_at": "2026-07-25T03:03:15",
+     "created_by": "demo-seed"
+    },
+    {
+     "id": 84,
+     "actor": "human",
+     "action": "sashimodoshi",
+     "memo": "生成時間の実測値が古い。作り直してほしい",
+     "created_at": "2026-07-25T09:10:00",
+     "created_by": "dashboard-20260725"
+    }
+   ],
+   "facts": [
+    {
+     "id": 103,
+     "content": "Wan 768×1152×37fの生成は約4.5時間かかる",
+     "status": "verified",
+     "retired": false,
+     "superseded": false
+    }
+   ],
    "related": []
   }
  }
