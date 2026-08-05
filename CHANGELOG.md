@@ -5,6 +5,17 @@
 修正のみは PATCH。dashboard など claude-config 側の変更もここに書く(一冊主義)。
 v0.0.1 以前の経緯は git log と docs/ を参照。
 
+## [v0.2.0] - 2026-08-05
+
+### ingest自己修復watchdogの追加
+
+NAS再起動時にeth0のアドレス取得よりdocker起動が先行すると、ingestの
+LAN IP(INGEST_BIND_IP)へのbindが失敗したままexitedで取り残される(restartポリシーは
+起動失敗をリトライしない)。この取り残しを回復するwatchdogを追加した。
+cron 5分毎に/healthをピン止め証明書で確認し、不通ならforce-recreateする。
+bind先アドレスが未割当の間は待機し、compose操作には実行時間の上限を設けた。
+配置はdeploy_nas_batch.sh(claude-config側)の配布リストに追加した。
+
 ## [v0.1.0] - 2026-08-05
 
 ### dashboard: タブ再編 — 決裁・後閲と逓送の分離

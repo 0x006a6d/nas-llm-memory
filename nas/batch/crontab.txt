@@ -28,3 +28,6 @@
 
 # sender(NAS自身も端末として送信 — 設計書§8)
 17 * * * *  python3 /volume1/homes/NAS_USER/claude-config/hooks/sender.py
+
+# ingest自己修復watchdog(/health不通ならforce-recreate。bind先アドレス未割当中は待機)
+*/5 * * * *  /volume2/claude-system/batch/ingest_watchdog.sh >> /volume2/claude-system/batch/watchdog.log 2>&1
