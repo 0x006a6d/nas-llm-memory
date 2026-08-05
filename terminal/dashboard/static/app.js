@@ -150,7 +150,7 @@ function warnings() {
   }
   const sc = S.skill_candidates || [];
   if (sc.length) out.push({ kind: "info", tag: "スキル候補",
-    text: `未採用のスキル候補が ${sc.length} 件あります(スキルタブで確認。検出2回以上の候補は夜間バッチが登載伺いとして起票し、「決裁・後閲」タブの「決裁待ち・未決」であなたの決裁を待ちます)。` });
+    text: `未採用のスキル候補が ${sc.length} 件あります(スキルタブで確認。検出2回以上の候補は夜間バッチが登載伺い(新規)・改定伺い(改善提案)として起票し、「決裁・後閲」タブの「決裁待ち・未決」であなたの決裁を待ちます)。` });
   if (N.shelf_pending) out.push({ kind: "info", tag: "後閲待ち",
     text: `後閲待ちの決裁文書が ${N.shelf_pending} 件あります(「決裁・後閲」タブで後閲印または差し戻し)。` });
   const sy = (S.spool || {}).sync;
@@ -818,9 +818,18 @@ const SHELF_KIND = { fact: "facts登載", index: "index改定", skill: "skill登
   haiki: "廃棄", ikan: "移管", tenken: "管理状況報告" };
 const SHELF_SEEN = { pending: ["後閲待ち", "warn"], seen: ["後閲済", "ok"], remanded: ["差し戻し", "err"] };
 const DECISION_CLASS = { senketsu: "課長専決", bucho: "部長決裁", human: "人間決裁" };
-// 後閲は完結した文書にだけ意味がある(未決・審査中の文書は後閲待ちではない)
-const seenChip = (d) => (["executed", "rejected", "approved"].includes(d.state)
-  ? chipOf(SHELF_SEEN, d.seen_state) : '<span class="faint">—</span>');
+// 後閲は完結した文書にだけ意味がある(未決・審査中の文書は後閲待ちではない)。
+// seen でも回議録に kouetsu が無い文書(人間が自ら決裁・否決した文書、差し戻し→
+// 再審理で完結した文書)は後閲という工程自体が発生していないので、「後閲済」では
+// なく「後閲不要」と示す(原本の決裁欄の後閲マスが空欄なのと矛盾させない)。
+// 一覧行はサーバの has_kouetsu、原本モーダルは d.log から判定する
+const hasKouetsu = (d) => (d.has_kouetsu === undefined || d.has_kouetsu === null
+  ? (d.log || []).some((e) => e.action === "kouetsu") : !!d.has_kouetsu);
+const seenChip = (d) => {
+  if (!["executed", "rejected", "approved"].includes(d.state)) return '<span class="faint">—</span>';
+  if (d.seen_state === "seen" && !hasKouetsu(d)) return '<span class="chip ok">後閲不要</span>';
+  return chipOf(SHELF_SEEN, d.seen_state);
+};
 const SHELF_ACTION = { kian: "起案", hosei: "補正", shinsa_ok: "審査済(専決)", joshin: "上申",
   sashimodoshi: "差し戻し", kessai_ok: "決裁", hiketsu: "否決", shiko: "施行",
   kouetsu: "後閲", saishinri: "再審理", kurikoshi: "未決繰越", skill_mv: "git移動" };
@@ -1482,9 +1491,9 @@ function renderSkills(el) {
   const cands = S.skill_candidates || [];
   const candHtml = cands.length ? `
     <h2 class="section">スキル候補(自動発掘・未採用) — ${cands.length} 件</h2>
-    <div class="note info"><span class="tag">仕組み</span><span>日次バッチが全端末のログから反復手順を発掘した候補です。ここにある間は何も発動しません。検出2回以上の新規候補は夜間バッチが登載伺いとして起票し、審査(課長)の上申を経て「決裁・後閲」タブの「決裁待ち・未決」に並びます。あなたが決裁すると翌晩 skills/ に登載され、全端末へ配布されます。改善提案(improve)は従来どおり人間が判断します。不要な候補は skills-candidates/ から削除してください。</span></div>
+    <div class="note info"><span class="tag">仕組み</span><span>日次バッチが全端末のログから反復手順を発掘した候補です。ここにある間は何も発動しません。検出2回以上の候補は夜間バッチが起票します — 新規は<b>登載伺い</b>、改善提案(improve)は審査(課長)が現行SKILL.mdへ溶かし込んだ改定後全文を作る<b>改定伺い</b>として。どちらも「決裁・後閲」タブの「決裁待ち・未決」であなたの決裁を待ち、決裁すると翌晩施行(登載/上書き)されて全端末へ配布されます。不要な候補は skills-candidates/ から削除してください。</span></div>
     <div class="card"><table>
-      <tr><th>名前</th><th>種別</th><th>要約</th><th style="text-align:right">検出回数</th><th style="text-align:right">根拠turns</th><th>最終検出</th><th></th></tr>
+      <tr><th>名前</th><th>種別</th><th>要約</th><th style="text-align:right">検出回数</th><th style="text-align:right">根拠turns</th><th>最終検出</th><th>起票</th><th></th></tr>
       ${cands.map((c, i) => `<tr>
         <td class="mono" style="white-space:nowrap">${esc(c.name)}</td>
         <td>${c.kind === "improve" ? `<span class="chip warn">改善: ${esc(c.target_skill || "")}</span>` : '<span class="chip blue">新規</span>'}</td>
@@ -1492,9 +1501,10 @@ function renderSkills(el) {
         <td class="num">${esc(c.count)}</td>
         <td class="num">${esc(c.evidence_n)}</td>
         <td class="mono faint">${esc(c.updated)}</td>
+        <td class="cand-st" data-i="${i}"><span class="faint">…</span></td>
         <td>${c.draft ? `<button class="btn mini ghost cand-open" data-i="${i}">下書き</button>` : ""}</td>
       </tr>
-      <tr class="cand-body" data-for="${i}" hidden><td colspan="7"><code class="block"></code></td></tr>`).join("")}
+      <tr class="cand-body" data-for="${i}" hidden><td colspan="8"><code class="block"></code></td></tr>`).join("")}
     </table></div>` : "";
 
   // 出所 → 見出しと編集可否。プラグインは cache 内の配布物なので編集対象にしない
@@ -1542,16 +1552,19 @@ function renderSkills(el) {
         ? [...list].sort((a, b) => useTotal(b, agents) - useTotal(a, agents)
             || a.name.localeCompare(b.name))
         : list;
+      const ncols = agents.length + (usage ? 1 : 0) + 4;  // 名前+説明+サイズ+開く列
       return `
       <h2 class="section">${srcHead(src, list)}</h2>
       <div class="card"><table>
-        <tr><th>${nameHead}</th>${agents.map((a) => `<th style="text-align:right" title="${esc(AGENT_TITLE[a] || "")}">${esc(AGENT_COL[a] || a)}</th>`).join("")}${usage ? "<th>最終使用</th>" : ""}<th>説明(frontmatter)</th><th style="text-align:right">サイズ</th></tr>
+        <tr><th>${nameHead}</th>${agents.map((a) => `<th style="text-align:right" title="${esc(AGENT_TITLE[a] || "")}">${esc(AGENT_COL[a] || a)}</th>`).join("")}${usage ? "<th>最終使用</th>" : ""}<th>説明(frontmatter)</th><th style="text-align:right">サイズ</th><th></th></tr>
         ${rows.map((s) => `<tr>
           <td class="mono" style="white-space:nowrap">${esc(s.name)}</td>
           ${agents.map((a) => `<td class="num">${useCount(s, a) > 0 ? `<strong>${useCount(s, a)}</strong>` : '<span class="faint">0</span>'}</td>`).join("")}
           ${usage ? `<td class="mono faint">${esc(useLast(s, agents) || "—")}</td>` : ""}
           <td class="muted">${esc(s.description || "—")}</td>
-          <td class="num">${kb(s.bytes)}</td></tr>`).join("")}
+          <td class="num">${kb(s.bytes)}</td>
+          <td>${s.path ? `<button class="btn mini ghost sk-open" data-path="${esc(s.path)}">開く</button>` : ""}</td></tr>
+        <tr class="sk-body" hidden><td colspan="${ncols}"><code class="block"></code></td></tr>`).join("")}
       </table></div>`;
     }).join("");
   }
@@ -1591,6 +1604,41 @@ function renderSkills(el) {
       const body = el.querySelector(`.cand-body[data-for="${btn.dataset.i}"]`);
       if (!body.hidden) { body.hidden = true; btn.textContent = "下書き"; return; }
       $("code", body).textContent = (S.skill_candidates[Number(btn.dataset.i)] || {}).draft || "(空)";
+      body.hidden = false;
+      btn.textContent = "閉じる";
+    };
+  });
+
+  // 候補の起票状態: NASのdrafts(kind=skill)と候補名を突き合わせて後追いで埋める
+  // (取得は数秒かかるためタブ描画をブロックしない。NAS不通時は「—」のまま)
+  if (cands.length) (async () => {
+    let ds = [];
+    try { ds = await j("/api/shelf?filter=all&kind=skill"); }
+    catch { /* NAS不通 */ }
+    const byName = {};
+    for (const r of ds) if (r.skill_name && !byName[r.skill_name]) byName[r.skill_name] = r;
+    el.querySelectorAll(".cand-st").forEach((td) => {
+      const c = cands[Number(td.dataset.i)] || {};
+      const d0 = byName[c.name];
+      if (!d0) { td.innerHTML = '<span class="faint">未起票</span>'; return; }
+      const [lb, cls] = SHELF_STATE[d0.state] || [d0.state, ""];
+      td.innerHTML = `<span class="chip ${cls}" style="white-space:nowrap">起票済 ${esc(docNoDisp(d0))} · ${esc(lb)}</span>`;
+    });
+  })();
+
+  // 一覧行の「開く」: 候補の「下書き」と同じインライン表示でファイル実体を読む
+  el.querySelectorAll(".sk-open").forEach((btn) => {
+    btn.onclick = async () => {
+      const body = btn.closest("tr").nextElementSibling;
+      if (!body || !body.classList.contains("sk-body")) return;
+      if (!body.hidden) { body.hidden = true; btn.textContent = "開く"; return; }
+      if (!body.dataset.loaded) {
+        try {
+          const r = await j(`/api/entry_file?path=${encodeURIComponent(btn.dataset.path)}`);
+          $("code", body).textContent = r.content || "(空)";
+          body.dataset.loaded = "1";
+        } catch (e) { $("code", body).textContent = `読めません: ${e.message}`; }
+      }
       body.hidden = false;
       btn.textContent = "閉じる";
     };
@@ -1729,15 +1777,9 @@ function renderTeiso(el) {
   clearTimeout(drawReplay._timer);
   const runs = N.batch_runs || [];
   el.innerHTML = `
-    <div class="note info"><span class="tag">このタブ</span><span>NAS 夜間バッチ(夜間便)の発着記録です。crontab の登録内容、実行履歴(逓送簿)、回議の便リプレイをまとめます。判断そのもの(決裁待ち・後閲待ち)は「決裁・後閲」タブへ。</span></div>
-    <h2 class="section">NAS 夜間バッチ(crontab)</h2>
-    ${(() => {
-      const bc = N.batch_config;
-      return bc && bc.model
-        ? `<div class="note info"><span class="tag">モデル</span><span>バッチの claude -p は <span class="mono">${esc(bc.model)}</span> で実行(設定: <span class="mono">/volume2/claude-system/batch/config.json</span>。実際に使われたモデルは各 batch/*.log の claude-usage 行に model= で記録)。</span></div>`
-        : `<div class="note warn"><span class="tag">モデル未設定</span><span>NAS の batch/config.json が無いか model が空です。CLI デフォルトで動くため、デフォルト変更で夜間バッチのモデルが黙って変わります。</span></div>`;
-    })()}
-    <div class="card"><code class="block">${esc(S.crontab)}</code></div>
+    <div class="note info"><span class="tag">このタブ</span><span>NAS 夜間バッチ(夜間便)の発着記録です。回議の便リプレイ、実行履歴(逓送簿)、crontab の登録内容をまとめます。判断そのもの(決裁待ち・後閲待ち)は「決裁・後閲」タブへ。</span></div>
+    <h2 class="section">夜間便リプレイ</h2>
+    <div class="card" id="replayCard"></div>
 
     <h2 class="section">バッチ実行履歴(逓送簿。直近${runs.length}件)</h2>
     <div class="note info"><span class="tag">読み方</span><span>時刻はUTC(JSTは+9時間)。ロック敗退や cron 起動失敗はここに row を残さず「時間が来ても行が増えない」形で現れます — その検知は文書事務概況タブの注意欄(未記録・成功が古い・滞留)が担当します。</span></div>
@@ -1754,8 +1796,14 @@ function renderTeiso(el) {
         <td class="faint" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(b.notes || "")}">${esc(String(b.notes || ""))}</td></tr>`).join("")}
     </table></div>
 
-    <h2 class="section">夜間便リプレイ</h2>
-    <div class="card" id="replayCard"></div>`;
+    <h2 class="section">NAS 夜間バッチ(crontab)</h2>
+    ${(() => {
+      const bc = N.batch_config;
+      return bc && bc.model
+        ? `<div class="note info"><span class="tag">モデル</span><span>バッチの claude -p は <span class="mono">${esc(bc.model)}</span> で実行(設定: <span class="mono">/volume2/claude-system/batch/config.json</span>。実際に使われたモデルは各 batch/*.log の claude-usage 行に model= で記録)。</span></div>`
+        : `<div class="note warn"><span class="tag">モデル未設定</span><span>NAS の batch/config.json が無いか model が空です。CLI デフォルトで動くため、デフォルト変更で夜間バッチのモデルが黙って変わります。</span></div>`;
+    })()}
+    <div class="card"><code class="block">${esc(S.crontab)}</code></div>`;
 
   drawReplay($("#replayCard", el));
 }
@@ -1783,6 +1831,10 @@ function renderCollect(el) {
         <option value="">全種別</option>
         ${Object.entries(SHUJU_KIND).map(([v, l]) =>
           `<option value="${v}"${kind === v ? " selected" : ""}>${l}</option>`).join("")}
+      </select>
+      <select id="shujuStatus">
+        <option value="">全処理状況</option>
+        <option value="error"${renderCollect._status === "error" ? " selected" : ""}>要確認(収受エラー)のみ</option>
       </select>
     </div>
     <div class="card" id="shujuList">読み込み中…</div>
@@ -1816,8 +1868,9 @@ function renderCollect(el) {
   async function loadShuju() {
     const device = renderCollect._device || "";
     const kd = renderCollect._kind || "";
+    const st = renderCollect._status || "";
     let data;
-    try { data = await j(`/api/shuju?device=${encodeURIComponent(device)}&kind=${encodeURIComponent(kd)}`); }
+    try { data = await j(`/api/shuju?device=${encodeURIComponent(device)}&kind=${encodeURIComponent(kd)}&status=${encodeURIComponent(st)}`); }
     catch (e) {
       $("#shujuDev", el).innerHTML = `<div class="note warn"><span class="tag">取得失敗</span><span>${esc(e.message)}</span></div>`;
       $("#shujuList", el).textContent = "";
@@ -1825,14 +1878,24 @@ function renderCollect(el) {
     }
     const devs = data.devices || [];
     $("#shujuDev", el).innerHTML = devs.length ? `<table>
-      <tr><th>端末</th><th class="num">収受件数</th><th class="num">収受エラー</th><th>最終受付</th></tr>
+      <tr><th>端末</th><th class="num" style="width:110px">収受件数</th><th class="num" style="width:110px">収受エラー</th><th>最終受付</th></tr>
       ${devs.map((d) => `<tr>
         <td class="mono">${esc(d.device)}</td>
         <td class="num">${num(d.n)}</td>
-        <td class="num">${Number(d.errs) ? `<span class="chip err">${num(d.errs)}</span>` : "0"}</td>
+        <td class="num">${Number(d.errs) ? `<span class="chip err click shuju-deverr" data-d="${esc(d.device)}" title="クリックでこの端末の要確認だけを受付台帳に表示">${num(d.errs)}</span>` : "0"}</td>
         <td class="mono faint">${esc(String(d.last_at || "").slice(0, 16).replace("T", " "))}</td>
       </tr>`).join("")}
     </table>` : '<span class="faint">収受の記録がありません。</span>';
+
+    // エラー件数クリック → その端末の要確認だけに台帳を絞り込む(下の台帳で内容を開ける)
+    $("#shujuDev", el).querySelectorAll(".shuju-deverr").forEach((sp) => {
+      sp.onclick = () => {
+        renderCollect._device = sp.dataset.d;
+        renderCollect._status = "error";
+        $("#shujuStatus", el).value = "error";
+        loadShuju();
+      };
+    });
 
     const sel = $("#shujuDevice", el);
     sel.innerHTML = '<option value="">全端末</option>' + devs.map((d) =>
@@ -1848,12 +1911,21 @@ function renderCollect(el) {
         <td class="mono">${esc(r.device)}</td>
         <td>${esc(SHUJU_KIND[r.kind] || r.kind)}</td>
         <td class="num">${kb(Number(r.bytes || 0))}</td>
-        <td>${shujuStatus(r)}</td>
-      </tr>`).join("")}
+        <td>${r.parse_error ? `<span class="chip err click shuju-err" title="クリックでエラー内容を表示">要確認</span>` : shujuStatus(r)}</td>
+      </tr>${r.parse_error ? `<tr class="shuju-errbody" hidden><td colspan="6"><code class="block">${esc(r.parse_error)}</code></td></tr>` : ""}`).join("")}
     </table>` : '<span class="faint">該当する収受はありません。</span>';
+
+    // 要確認クリック → 直下にエラー内容(parse_error)を開閉
+    $("#shujuList", el).querySelectorAll(".shuju-err").forEach((sp) => {
+      sp.onclick = () => {
+        const b = sp.closest("tr").nextElementSibling;
+        if (b && b.classList.contains("shuju-errbody")) b.hidden = !b.hidden;
+      };
+    });
   }
 
   $("#shujuKind", el).onchange = (e) => { renderCollect._kind = e.target.value; loadShuju(); };
+  $("#shujuStatus", el).onchange = (e) => { renderCollect._status = e.target.value; loadShuju(); };
   loadShuju();
 }
 

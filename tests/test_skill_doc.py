@@ -12,8 +12,12 @@ from unittest import mock
 from test_ringi_flow import Harness
 
 
+BASE_MD = "---\nname: raster-qa\ndescription: 既存手順\n---\n\n# 手順\n1. 前からある\n"
+
+
 def setup_repo(h, name="raster-qa", count=3, kind="new", skill_md="# 手順\n1. やる\n",
-               case=None):
+               case=None, target=None, base_md=BASE_MD):
+    """target を渡すと meta に target_skill を書き、skills/<target>/SKILL.md も作る。"""
     repo = Path(tempfile.mkdtemp(prefix="repo-test-"))
     if case is not None:  # /tmp に残骸を残さない
         case.addCleanup(shutil.rmtree, repo, ignore_errors=True)
@@ -22,9 +26,14 @@ def setup_repo(h, name="raster-qa", count=3, kind="new", skill_md="# 手順\n1. 
     d.mkdir(parents=True)
     meta = {"name": name, "kind": kind, "summary": "テスト手順", "count": count,
             "evidence": [1, 2], "created": "2026-07-01"}
+    if target is not None:
+        meta["target_skill"] = target
     (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     (d / "SKILL.md").write_text(skill_md, encoding="utf-8")
     (repo / "skills").mkdir()
+    if target and base_md is not None:
+        (repo / "skills" / target).mkdir()
+        (repo / "skills" / target / "SKILL.md").write_text(base_md, encoding="utf-8")
     return repo
 
 
@@ -33,8 +42,12 @@ class SkillHarness(Harness):
         super().__init__(config=config)
         self.skill_prev = None  # 起票済み判定クエリへの応答(list or None)
         self.skill_mv_count = "1"  # 移動完了の記帳(再開テスト用。"0"=記帳なし)
+        self.merged = "---\nname: raster-qa\n---\n改定後全文"  # 施行が読むpayload.merged
 
     def fake_psql(self, sql):
+        if "payload->>'merged'" in sql:
+            self.sqls.append(sql)
+            return self.merged
         if "payload->>'name'" in sql:
             self.sqls.append(sql)
             return json.dumps(self.skill_prev) if self.skill_prev else ""
@@ -57,11 +70,58 @@ class TestSkillScan(unittest.TestCase):
         h.scan()
         self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])
 
-    def test_improve_kind_skipped(self):
+    def test_improve_filed_and_stops_at_joshin(self):
+        """improve候補は改定伺いとして起票され、審査が改定後全文を付けて上申で停止する。"""
         h = SkillHarness()
-        setup_repo(h, kind="improve", case=self)
+        setup_repo(h, name="raster-qa-improve", kind="improve", target="raster-qa",
+                   skill_md="## 追加\n- 新ゲート\n", case=self)
+        h.scripts["shinsa-improve"] = [
+            {"action": "joshin", "memo": "守備範囲内・重複なし",
+             "merged": BASE_MD + "\n## 追加\n- 新ゲート\n"}]
+        h.scan()
+        drafts = h.sqls_like("INSERT INTO drafts")
+        self.assertEqual(len(drafts), 1)
+        self.assertIn("改定について(伺い)", drafts[0])
+        # 上申前に改定後全文が本文(別記第2)とpayloadへ書き戻される
+        upd = h.sqls_like("UPDATE drafts SET proposal=")
+        self.assertEqual(len(upd), 1)
+        self.assertIn("改定後のSKILL.md全文", upd[0])
+        self.assertIn("merged", upd[0])
+        # joshin(pending_decision)で停止。決裁・施行はされない
+        self.assertTrue(h.sqls_like("state='pending_decision'"))
+        self.assertEqual(h.sqls_like("decision_class="), [])
+        self.assertEqual(h.sqls_like("executed_at=now()"), [])
+        self.assertEqual([a[1] for a in h.asks], ["ms"])
+
+    def test_improve_oversized_base_not_filed(self):
+        """現行SKILL.mdが審査に全文を渡せない大きさなら起票しない(切り詰め改定の防止)。"""
+        h = SkillHarness()
+        setup_repo(h, name="raster-qa-improve", kind="improve", target="raster-qa",
+                   base_md=BASE_MD + "x" * 15_001, case=self)
         h.scan()
         self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])
+        self.assertEqual(h.asks, [])  # 審査も呼ばない
+
+    def test_improve_without_target_not_filed(self):
+        """改定対象がskills/に無いimprove候補は起票しない。"""
+        h = SkillHarness()
+        setup_repo(h, name="raster-qa-improve", kind="improve", target="raster-qa",
+                   base_md=None, case=self)  # skills/raster-qa を作らない
+        h.scan()
+        self.assertEqual(h.sqls_like("INSERT INTO drafts"), [])
+
+    def test_improve_merged_without_frontmatter_rejected(self):
+        """frontmatterを失った改定後全文は形式不一致として否決(廃案)する。"""
+        h = SkillHarness()
+        setup_repo(h, name="raster-qa-improve", kind="improve", target="raster-qa",
+                   case=self)
+        h.scripts["shinsa-improve"] = [
+            {"action": "joshin", "memo": "ok", "merged": "# frontmatterが消えた全文"}]
+        h.scan()
+        self.assertTrue(h.sqls_like("state='rejected'"))
+        self.assertEqual(h.sqls_like("state='pending_decision'"), [])
+        logs = "\n".join(h.sqls_like("INSERT INTO draft_log"))
+        self.assertIn("形式不一致", logs)
 
     def test_collision_with_existing_skill_skipped(self):
         h = SkillHarness()
@@ -241,6 +301,100 @@ class TestExecuteSkillDoc(unittest.TestCase):
                 h.mod.execute_skill_doc(7, "raster-qa", run_id=9)
         self.assertEqual(h.sqls_like("executed_at=now()"), [])
         self.assertEqual(calls, [])  # gitも触らない
+
+
+class TestExecuteImproveDoc(unittest.TestCase):
+    def _improve_repo(self, h):
+        return setup_repo(h, name="raster-qa-improve", kind="improve",
+                          target="raster-qa", skill_md="## 追加\n- 新ゲート\n", case=self)
+
+    def test_overwrite_and_candidate_removed(self):
+        """施行は封緘済みpayload.mergedでの上書き+候補削除+commit&push。"""
+        h = SkillHarness()
+        repo = self._improve_repo(h)
+        git_calls = []
+
+        def fake_run(cmd, **kw):
+            git_calls.append(cmd)
+            return mock.Mock(returncode=0)
+
+        with h.ctx(), mock.patch.object(h.mod.subprocess, "run", side_effect=fake_run):
+            h.mod.execute_improve_doc(7, "raster-qa-improve", "raster-qa", run_id=9)
+        text = (repo / "skills" / "raster-qa" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertEqual(text, h.merged + "\n")  # 施行時に本文を再生成しない
+        joined = [" ".join(map(str, c)) for c in git_calls]
+        self.assertTrue(any("add -- skills/raster-qa/SKILL.md" in c for c in joined))
+        self.assertTrue(any("rm -r -q -- skills-candidates/raster-qa-improve" in c
+                            for c in joined))
+        self.assertTrue(any("push" in c for c in joined))
+        self.assertTrue(h.sqls_like("executed_at=now()"))
+        logs = "\n".join(h.sqls_like("INSERT INTO draft_log"))
+        self.assertIn("'skill_mv'", logs)  # 改定完了の記帳(中断再開の判定根拠)
+        self.assertIn("skills/raster-qa を改定", logs)
+
+    def test_missing_target_errors(self):
+        h = SkillHarness()
+        repo = self._improve_repo(h)
+        (repo / "skills" / "raster-qa" / "SKILL.md").unlink()
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0, stdout="")
+
+        with h.ctx(), mock.patch.object(h.mod.subprocess, "run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "改定対象"):
+                h.mod.execute_improve_doc(7, "raster-qa-improve", "raster-qa", run_id=9)
+        self.assertEqual(calls, [])  # 対象不在はgit実行前に検出する
+        self.assertEqual(h.sqls_like("executed_at=now()"), [])
+
+    def test_empty_merged_errors(self):
+        h = SkillHarness()
+        self._improve_repo(h)
+        h.merged = ""
+        with h.ctx(), mock.patch.object(h.mod.subprocess, "run",
+                                        side_effect=lambda *a, **k: mock.Mock(returncode=0)):
+            with self.assertRaises(RuntimeError):
+                h.mod.execute_improve_doc(7, "raster-qa-improve", "raster-qa", run_id=9)
+        self.assertEqual(h.sqls_like("executed_at=now()"), [])
+
+    def test_resume_without_record_rejected(self):
+        """候補が無く改定の記帳も無い=手動削除の可能性。誤って施行完了にしない。"""
+        h = SkillHarness()
+        h.skill_mv_count = "0"
+        repo = self._improve_repo(h)
+        shutil.rmtree(repo / "skills-candidates" / "raster-qa-improve")
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0, stdout="")
+
+        with h.ctx(), mock.patch.object(h.mod.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError):
+                h.mod.execute_improve_doc(7, "raster-qa-improve", "raster-qa", run_id=9)
+        self.assertEqual(h.sqls_like("executed_at=now()"), [])
+        self.assertEqual(calls, [])
+
+    def test_resume_with_record_pushes_and_advances(self):
+        """候補が無く記帳がある=前回のrunで改定済み。commit/pushして状態を進める。"""
+        h = SkillHarness()
+        repo = self._improve_repo(h)
+        shutil.rmtree(repo / "skills-candidates" / "raster-qa-improve")
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0,
+                             stdout="M  skills/raster-qa/SKILL.md" if "status" in cmd else "")
+
+        with h.ctx(), mock.patch.object(h.mod.subprocess, "run", side_effect=fake_run):
+            h.mod.execute_improve_doc(7, "raster-qa-improve", "raster-qa", run_id=9)
+        joined = [" ".join(map(str, c)) for c in calls]
+        self.assertTrue(any("commit" in c for c in joined))
+        self.assertTrue(any("push" in c for c in joined))
+        self.assertTrue(h.sqls_like("executed_at=now()"))
+        self.assertIn("前回の中断分", "\n".join(h.sqls_like("INSERT INTO draft_log")))
 
 
 if __name__ == "__main__":

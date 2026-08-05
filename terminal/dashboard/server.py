@@ -590,6 +590,19 @@ def skill_candidates():
     return out
 
 
+def entry_file(path):
+    """スキル/コマンド/エージェント一覧の実体ファイルを読む(閲覧のみ)。
+
+    許可するのは一覧(collect_*)が返したパスに限る(任意パスの読み出し口にしない)。
+    """
+    p = str(path or "")
+    allowed = {e.get("path") for e in
+               collect_skills() + collect_commands() + collect_agents()}
+    if p not in allowed:
+        raise ValueError("一覧にあるファイル以外は読めません")
+    return {"path": p, "content": read_text(Path(p)) or ""}
+
+
 def routing_state():
     """routing.json(端末別のindex注入宣言)と自端末のローカルレジストリ。"""
     path = CONFIG_DIR / "routing.json"
@@ -1044,10 +1057,12 @@ def fact_op(op, project, content, fact_id):
 
 # ---------------------------------------------------------------- 収受簿(raw_payloads)
 
-def shuju_list(device="", kind=""):
+def shuju_list(device="", kind="", status=""):
     """収受簿: raw_payloads の受付台帳(収受番号=id、受付印=received_at)。
 
     処理状況は parsed_at(受理済)/parse_error(要確認)/どちらも無し(未処理)で表す。
+    status='error' で要確認(parse_error あり)だけに絞る(エラーは直近100件より
+    古いことがあるため、台帳の器のまま全期間から引けるようにする)。
     台帳は直近100件、端末別集計は全期間。時刻は接続のPGTZでJSTになる。
     """
     if DEMO:
@@ -1057,12 +1072,17 @@ def shuju_list(device="", kind=""):
             rows = [r for r in rows if r.get("device") == device]
         if kind:
             rows = [r for r in rows if r.get("kind") == kind]
+        if status == "error":
+            # 判定は本番SQL(parse_error is not null)と同じにする
+            rows = [r for r in rows if r.get("parse_error") is not None]
         return {"rows": rows, "devices": data.get("devices", [])}
     cond = "true"
     if device:
         cond += f" and device = {dollar_quote(device)}"
     if kind:
         cond += f" and kind = {dollar_quote(kind)}"
+    if status == "error":
+        cond += " and parse_error is not null"
     rows = sql_json(
         "select id, device, kind, received_at, parsed_at, parse_error, "
         "octet_length(payload::text) bytes from raw_payloads "
@@ -1145,7 +1165,17 @@ def shelf_list(filt, kind, state=None):
             rows = [r for r in rows if r.get("kind") == kind]
         if state:
             rows = [r for r in rows if r.get("state") == state]
-        return [_stamp_doc_no(dict(r)) for r in rows]
+        # has_kouetsu/skill_name は本番SQLと同じ意味をdocsのlog/payloadから引く
+        docs = data.get("docs") or {}
+        out = []
+        for r in rows:
+            r = _stamp_doc_no(dict(r))
+            doc = docs.get(str(r.get("id"))) or {}
+            log = doc.get("log") or []
+            r["has_kouetsu"] = any(e.get("action") == "kouetsu" for e in log)
+            r["skill_name"] = (doc.get("payload") or {}).get("name")
+            out.append(r)
+        return out
     cond = "true"
     if filt == "pending":
         # 後閲対象 = 完結して人間がまだ見ていない文書(施行済み・廃案・後閲待ちskill)
@@ -1171,7 +1201,10 @@ def shelf_list(filt, kind, state=None):
         cond = f"({cond}) and state = {dollar_quote(state)}"
     return [_stamp_doc_no(r) for r in sql_json(
         "select id, doc_no, fiscal_year, seq, kind, project_key, title, state, "
-        "decision_class, seen_state, created_at, decided_at, executed_at, related_doc "
+        "decision_class, seen_state, created_at, decided_at, executed_at, related_doc, "
+        "payload->>'name' as skill_name, "
+        "exists(select 1 from draft_log dl where dl.draft_id = drafts.id "
+        "and dl.action = 'kouetsu') as has_kouetsu "
         f"from drafts where {cond} order by id desc limit 100")]
 
 
@@ -1853,7 +1886,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(list_messages())
             elif url.path == "/api/shuju":
                 self.send_json(shuju_list(q.get("device", [""])[0],
-                                          q.get("kind", [""])[0]))
+                                          q.get("kind", [""])[0],
+                                          q.get("status", [""])[0]))
+            elif url.path == "/api/entry_file":
+                self.send_json(entry_file(q.get("path", [""])[0]))
             elif url.path == "/api/shelf":
                 self.send_json(shelf_list(q.get("filter", ["pending"])[0],
                                           q.get("kind", [""])[0],

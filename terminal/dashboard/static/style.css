@@ -245,6 +245,8 @@ tr:last-child td { border-bottom: none; }
 
 td.num { font-variant-numeric: tabular-nums; text-align: right; font-family: var(--mono); font-size: 12px; }
 
+th.num { text-align: right; }
+
 code, .mono { font-family: var(--mono); font-size: 12px; }
 
 code.block {
