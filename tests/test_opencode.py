@@ -173,7 +173,7 @@ class TestSpoolOpencode(unittest.TestCase):
                 messages=[msg("msg_1", 1_000, "assistant", updated=1_000)],  # 行は据え置き
                 parts=[part("prt_1", "msg_1", 1_000, {"type": "reasoning", "text": "考え中"})])
         con = sqlite3.connect(self.db)
-        con.execute("UPDATE part SET time_updated = 9_999_000 WHERE id='prt_1'")  # 執筆中
+        con.execute("UPDATE part SET time_updated = 9999000 WHERE id='prt_1'")  # 執筆中
         con.commit(); con.close()
         self.assertEqual(self.run_scan(now=10_000.0), [])          # 送らない
         self.assertFalse((self.home / ".claude-spool" / "opencode-sent.jsonl").exists())

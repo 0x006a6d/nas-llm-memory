@@ -5,6 +5,20 @@
 修正のみは PATCH。dashboard など claude-config 側の変更もここに書く(一冊主義)。
 v0.0.1 以前の経緯は git log と docs/ を参照。
 
+## [v0.3.1] - 2026-08-18
+
+### claude-config: dotfiles-maintenanceスキルのGitHubアカウント名を修正
+
+スキルのdescriptionと本文が旧アカウント名Flowers-of-Romanceのままだったため、
+リネーム後の0x006a6dに直した。GCMの資格情報キーとremote URLのusernameは
+旧名のままで動くため、そちらは変更していない。
+
+### テストのSQLリテラルをSQLite 3.45系でも通る書き方に直す
+
+test_opencode.pyがSQL文字列に数値リテラル9_999_000を直書きしており、
+アンダースコア区切りに対応しないSQLite 3.46未満ではunrecognized tokenで
+落ちていた。区切りを外した。Python側のリテラルとバインドパラメータは変更なし。
+
 ## [v0.3.0] - 2026-08-05
 
 ### skill改善提案(improve)を起案・決裁ワークフローへ
