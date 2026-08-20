@@ -5,6 +5,16 @@
 修正のみは PATCH。dashboard など claude-config 側の変更もここに書く(一冊主義)。
 v0.0.1 以前の経緯は git log と docs/ を参照。
 
+## [v0.3.2] - 2026-08-20
+
+### claude-config: SOPスキル5本を新母艦(RTX 5090機)の実態に更新
+
+母艦移行(EVO-X2 ROCm→RTX 5090 CUDA)に伴い、comfyui-launch・ds4-launch・
+vid2vid-pose-transfer・model-backup-nas・wezterm-tmuxのROCm前提の記述
+(HSA環境変数、SSD streaming必須、DWPoseのtorchscript回避、設定パス等)を
+新環境で検証した値に書き換えた。未実測の箇所(ds4のCUDA初回ビルド・起動)と
+移行で消えたローカルパッチ・補助スクリプトはその旨を明記した。
+
 ## [v0.3.1] - 2026-08-18
 
 ### claude-config: dotfiles-maintenanceスキルのGitHubアカウント名を修正
