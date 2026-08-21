@@ -133,18 +133,37 @@ def _expand(cmd):
     return cmd.replace("${HOME}", str(HOME)).replace("$HOME", str(HOME))
 
 
+# 引用符の有無で意味が変わる文字。これらを含むコマンドは引用の差を無視しない
+# (`echo *.txt` と `echo "*.txt"` は別物)。
+_SHELL_META = set('*?[]{}`$&;|<>()!#\\')
+
+
 def _same_cmd(existing, rendered):
     """手書きエントリと manifest 展開後エントリが同じコマンドかを判定する。
 
-    $HOME 表記と展開済みパス、引用符の有無だけが違うものを同一視する。
+    $HOME 表記と展開済みパスの差、および安全な形に限った引用符の差を同一視する。
     同一視しないと apply のたびに展開形が積み増され、同じ hook が多重登録される。
     """
+    if not isinstance(existing, str) or not isinstance(rendered, str):
+        return False
     if existing == rendered:
         return True
+    expanded = _expand(existing)
+    if expanded == rendered:
+        return True
+    # ここから先は引用符の差だけを吸収する。シェル的に意味を持つ文字が
+    # 残っている場合は引用を外すと結果が変わりうるので、別物として扱う
+    if any(ch in _SHELL_META for ch in expanded + rendered):
+        return False
     try:
-        return shlex.split(_expand(existing)) == shlex.split(rendered)
+        tokens_existing = shlex.split(expanded)
+        tokens_rendered = shlex.split(rendered)
     except ValueError:
         return False
+    if tokens_existing != tokens_rendered:
+        return False
+    # 空白を含むトークンは引用が必須なので、引用の有無を同一視しない
+    return not any(any(c.isspace() for c in t) for t in tokens_existing)
 
 
 def render(hook, target, write_wrapper=False):
@@ -213,8 +232,9 @@ def _iter_hook_entries(hooks_dict):
     for ev, groups in (hooks_dict or {}).items():
         for g in groups:
             for h in g.get("hooks", []):
-                yield (ev, h.get("command", ""), g.get("matcher"),
-                       h.get("timeout"), h.get("if"))
+                cmd = h.get("command")
+                yield (ev, cmd if isinstance(cmd, str) else "",
+                       g.get("matcher"), h.get("timeout"), h.get("if"))
 
 
 def _iter_commands(hooks_dict):

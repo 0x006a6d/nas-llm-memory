@@ -67,6 +67,18 @@ class SameCmdCase(unittest.TestCase):
     def test_unbalanced_quotes_do_not_raise(self):
         self.assertFalse(self.mod._same_cmd('echo "unclosed', "echo unclosed"))
 
+    def test_glob_quoting_is_not_collapsed(self):
+        # 引用の有無でシェルの結果が変わるものは同一視しない
+        self.assertFalse(self.mod._same_cmd('echo "*.txt"', "echo *.txt"))
+        self.assertFalse(self.mod._same_cmd('sh -c "a; b"', "sh -c a; b"))
+
+    def test_token_with_space_is_not_collapsed(self):
+        self.assertFalse(self.mod._same_cmd('run "two words"', "run two words"))
+
+    def test_non_string_command_is_not_matched(self):
+        self.assertFalse(self.mod._same_cmd(None, "echo hi"))
+        self.assertFalse(self.mod._same_cmd("echo hi", None))
+
 
 class ApplyManifestCase(unittest.TestCase):
     """手書きエントリがある状態で apply したときの増減。"""
@@ -133,6 +145,17 @@ class ApplyManifestCase(unittest.TestCase):
         _, report, hooks = self._apply()
         self.assertEqual(len(hooks["PreToolUse"]), 2)
         self.assertEqual(len(report["added"]), 1)
+
+    def test_null_command_in_settings_does_not_crash(self):
+        # 壊れた設定 (command が null) が混ざっていても apply は落ちない
+        self.settings.write_text(json.dumps(
+            {"hooks": {"PreToolUse": [{"matcher": "Bash",
+                                       "hooks": [{"type": "command", "command": None}]}]}},
+            ensure_ascii=False), encoding="utf-8")
+        self._write_manifest(matcher="Bash")
+        _, report, hooks = self._apply()
+        self.assertEqual(len(report["added"]), 1)
+        self.assertEqual(len(hooks["PreToolUse"]), 2)
 
     def test_status_reports_home_form_as_applied(self):
         self._write_settings(matcher="Bash")

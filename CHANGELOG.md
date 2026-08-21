@@ -15,6 +15,8 @@ applyのたびに展開形が積み増されていた。commandの同一性を $
 引用符の差を吸収して判定し、あわせてmatcher・timeout・ifも一致条件に含めた
 (同じcommandをmatcher違いで登録する構成を取り違えないため)。dashboardの
 適用状態表示も同じ判定にそろえた。既存の重複エントリは端末側で手動整理した。
+引用符の差を吸収するのは、グロブや区切り文字など引用で意味が変わる文字を
+含まない場合に限る。commandがstrでないエントリ(壊れた設定)は比較対象から外す。
 
 ### claude-config: github-via-gcm・nas-memory-messageスキルを新母艦の実態に更新
 
