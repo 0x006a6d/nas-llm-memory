@@ -5,6 +5,23 @@
 修正のみは PATCH。dashboard など claude-config 側の変更もここに書く(一冊主義)。
 v0.0.1 以前の経緯は git log と docs/ を参照。
 
+## [v0.3.3] - 2026-08-21
+
+### hooks_apply: 同じhookが多重登録されるのを止めた
+
+新母艦のsettings.jsonでSessionEndが3件、SessionStartが2件に増えていた。
+存在判定が手書きの `$HOME` 表記と展開済み絶対パスを別物として扱うため、
+applyのたびに展開形が積み増されていた。commandの同一性を $HOME 展開と
+引用符の差を吸収して判定し、あわせてmatcher・timeout・ifも一致条件に含めた
+(同じcommandをmatcher違いで登録する構成を取り違えないため)。dashboardの
+適用状態表示も同じ判定にそろえた。既存の重複エントリは端末側で手動整理した。
+
+### claude-config: github-via-gcm・nas-memory-messageスキルを新母艦の実態に更新
+
+GCMの資格情報キーは箱ごとに違い、新母艦は `git:https://github.com` (username無し)。
+SOP通りに `username=Flowers-of-Romance` を付けるとアカウント選択待ちで無反応になる。
+判別方法と箱ごとの形を表にした。申し送りの宛先端末一覧に `poptones` を追加した。
+
 ## [v0.3.2] - 2026-08-20
 
 ### claude-config: SOPスキル5本を新母艦(RTX 5090機)の実態に更新

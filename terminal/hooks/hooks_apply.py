@@ -24,6 +24,7 @@ manifest スキーマ(hooks-manifest.example.json 参照):
 import hashlib
 import json
 import os
+import shlex
 import re
 import sys
 from datetime import datetime
@@ -132,6 +133,20 @@ def _expand(cmd):
     return cmd.replace("${HOME}", str(HOME)).replace("$HOME", str(HOME))
 
 
+def _same_cmd(existing, rendered):
+    """手書きエントリと manifest 展開後エントリが同じコマンドかを判定する。
+
+    $HOME 表記と展開済みパス、引用符の有無だけが違うものを同一視する。
+    同一視しないと apply のたびに展開形が積み増され、同じ hook が多重登録される。
+    """
+    if existing == rendered:
+        return True
+    try:
+        return shlex.split(_expand(existing)) == shlex.split(rendered)
+    except ValueError:
+        return False
+
+
 def render(hook, target, write_wrapper=False):
     """manifest エントリを target 用に変換する。(event, entry, notes) を返す。
 
@@ -189,23 +204,47 @@ def render(hook, target, write_wrapper=False):
     return event, entry, notes
 
 
-def _iter_commands(hooks_dict):
+def _iter_hook_entries(hooks_dict):
+    """設定に入っている hook を (event, command, matcher, timeout, if) で列挙する。
+
+    command だけで同一性を見ると、同じ command を matcher 違い(Bash 用と Write 用)や
+    timeout 違いで登録している場合に別物を取り違える。
+    """
     for ev, groups in (hooks_dict or {}).items():
         for g in groups:
             for h in g.get("hooks", []):
-                yield ev, h.get("command", "")
+                yield (ev, h.get("command", ""), g.get("matcher"),
+                       h.get("timeout"), h.get("if"))
+
+
+def _iter_commands(hooks_dict):
+    for ev, cmd, _matcher, _timeout, _cond in _iter_hook_entries(hooks_dict):
+        yield ev, cmd
+
+
+def _entry_identity(ev, entry):
+    """render が返した entry を _iter_hook_entries と同じ形にそろえる。"""
+    h = entry["hooks"][0]
+    return ev, h.get("command", ""), entry.get("matcher"), h.get("timeout"), h.get("if")
+
+
+def _same_hook(existing, rendered):
+    """設定内の1エントリと manifest 展開後エントリが同じ hook かを判定する。"""
+    ev_e, cmd_e, matcher_e, timeout_e, cond_e = existing
+    ev_r, cmd_r, matcher_r, timeout_r, cond_r = rendered
+    return (ev_e == ev_r and matcher_e == matcher_r
+            and timeout_e == timeout_r and cond_e == cond_r
+            and _same_cmd(cmd_e, cmd_r))
 
 
 def manifest_status():
     """dashboard 用: manifest 各行の適用状態。設定は書き換えない。"""
     manifest = load_manifest()
     actual = {
-        "claude": dict.fromkeys(
-            (ev, c) for ev, c in _iter_commands(
-                _read_json(_claude_settings_path(), {}).get("hooks"))),
-        "codex": dict.fromkeys(
-            (ev, c) for ev, c in _iter_commands(
-                _read_json(CODEX_HOOKS_PATH, {}).get("hooks"))),
+        "claude": list(_iter_hook_entries(
+            _read_json(_claude_settings_path(), {}).get("hooks"))),
+        "codex": list(_iter_hook_entries(
+            _read_json(CODEX_HOOKS_PATH, {}).get("hooks"))),
     }
     rows = []
     for i, hook in enumerate(manifest.get("hooks", [])):
@@ -219,8 +258,8 @@ def manifest_status():
                 continue
             try:
                 ev, entry, notes = render(hook, target)
-                cmd = entry["hooks"][0]["command"]
-                applied = (ev, cmd) in actual[target]
+                ident = _entry_identity(ev, entry)
+                applied = any(_same_hook(x, ident) for x in actual[target])
                 row["state"][target] = "applied" if applied else "pending"
                 row["notes"][target] = notes
             except UnsupportedHook as e:
@@ -291,8 +330,9 @@ def _apply_manifest_locked(dry_run=False):
                 tr["skipped"].append(f"{target}: {hook.get('name','?')} — {e}")
                 continue
             cmd = entry["hooks"][0]["command"]
-            exists = any(c == cmd and e == ev
-                         for e, c in _iter_commands(hooks_dict))
+            ident = _entry_identity(ev, entry)
+            exists = any(_same_hook(x, ident)
+                         for x in _iter_hook_entries(hooks_dict))
             if exists:
                 tr["adopted"].append(f"{target}: {hook.get('name','?')}")
             else:
