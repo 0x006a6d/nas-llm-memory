@@ -18,11 +18,18 @@ applyのたびに展開形が積み増されていた。commandの同一性を $
 引用符の差を吸収するのは、グロブや区切り文字など引用で意味が変わる文字を
 含まない場合に限る。commandがstrでないエントリ(壊れた設定)は比較対象から外す。
 
-### claude-config: github-via-gcm・nas-memory-messageスキルを新母艦の実態に更新
+### claude-config: SOPスキル6本を新母艦の実測で更新
 
-GCMの資格情報キーは箱ごとに違い、新母艦は `git:https://github.com` (username無し)。
-SOP通りに `username=Flowers-of-Romance` を付けるとアカウント選択待ちで無反応になる。
-判別方法と箱ごとの形を表にした。申し送りの宛先端末一覧に `poptones` を追加した。
+- github-via-gcm: GCMの資格情報キーは箱ごとに違い、新母艦は `git:https://github.com`
+  (username無し)。SOP通りに `username=Flowers-of-Romance` を付けるとアカウント選択待ちで
+  無反応になる。判別方法と箱ごとの形を表にした。トークンが空のまま進めない確認も足した。
+- bookshelf-launch: WSLがmirroredなのでportproxyは不要(実測)。証明書を新母艦のIPで
+  再発行する手順、移行時に手で運ぶファイル(.env/*.pem/books.db)の確認手順を追加。
+- ds4-launch: CUDAビルドと81GBフル常駐の初回実測(ビルド約2分、起動約2分、7.8秒/応答)。
+- comfyui-launch: ffmpegをaptで導入済み。rembgをonnxruntime-gpuで動かすにはcuDNNの
+  場所を渡す必要がある(モデルの置き場も ~/.rembg に変わった)。
+- claude-config-backup: 新母艦のパスに更新し、robocopy3本の終了コードを集約する形にした。
+- nas-memory-message: 申し送りの宛先端末一覧に `poptones` を追加した。
 
 ## [v0.3.2] - 2026-08-20
 
