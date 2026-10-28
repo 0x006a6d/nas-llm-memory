@@ -5,6 +5,35 @@
 修正のみは PATCH。dashboard など claude-config 側の変更もここに書く(一冊主義)。
 v0.0.1 以前の経緯は git log と docs/ を参照。
 
+## [v0.4.0] - 2026-10-29
+
+### step-gate: 指示や承認された作り方に無いやり方で進むのを止めるフックを足した
+
+PreToolUse の step-gate.py（dotfiles）を足した。実行・生成・書き込みの前に、何もしないコマンド
+`: '原文: … / やること: … / 原文に無いこと: …'` で、原文（会話にそのまま出ている指示や作り方の文）と
+これからやることを書かせ、原文が会話に無い・原文に無いことにユーザーの承認が無い場合は止める。
+照合は会話の記録だけで行い、ファイルを使わない（共通のファイルにすると、ほかの会話と取り合いになった）。
+返答の文は作業の途中では記録に入らないので、宣言はコマンドで打つ。ユーザーが ~/.claude/step_gate_off を
+置いた間は止めない。このフック・cause-gate.py・settings.json を Claude が書き換えるのも止める。
+general/index.md の決まりも「原文に書いていない所は、できるかどうかに関わらず埋めずに止める」に書き直した。
+
+### hooks: cause-gate・cause_gate・interrupt_check を登録し、判定を直した
+
+- cause-gate.py（PreToolUse）: 退避コピーの判定を、区切られた before / backup / bak だけにした。
+  項目の読み取りが改行をまたいで空の項目を次の行で埋めていたのを直した。
+- cause_gate.py（Stop）: 「原因は何ですか？」のような問いを断定として止めないようにした。
+  失敗した呼び出しや結果が空の呼び出しを「確かめた」に数えないようにした。
+- interrupt_check.py（UserPromptSubmit）: 中断の印を、ユーザー側の記録で印から始まるものだけにした。
+- settings.json: フックを python3 経由で起動し、claude-config のパスを $HOME 基準にした。
+
+### claude-config: スキル 5 本を足した
+
+skin-weight-viz、song-mv、tripo-blender-character-build、vrm-mouth、vrm-qc。
+skin-weight-viz の smooth_weights.py は、指定外の骨の重みを枠も値も残すようにし、正規化整数の重みの
+読み書きに対応し、5 本以上の骨の重みは書き出さずに止める。weight_paint.sh は Godot の失敗を隠さず、
+出力が無ければ失敗にする。vrm-qc の qc_sheet.py は、一時サーバを 127.0.0.1 で起動して自分の分だけ止め、
+Chrome の操作口を起動ごとに空いている番号にした。
+
 ## [v0.3.3] - 2026-08-21
 
 ### hooks_apply: 同じhookが多重登録されるのを止めた
