@@ -5,6 +5,14 @@
 修正のみは PATCH。dashboard など claude-config 側の変更もここに書く(一冊主義)。
 v0.0.1 以前の経緯は git log と docs/ を参照。
 
+## [v0.4.2] - 2026-11-25
+
+### skills: wezterm-tmux を wezterm-herdr に改名
+
+RTX5090 機の端末を tmux から herdr に一本化したのに合わせ、スキル名と現行構成の記述を直した。
+leader+g は herdr に新しいタブを作って claude を起動する herdr-claude-tab、端末起動時は
+herdr-autoattach.sh で herdr に入る。dotfiles-maintenance の claude-pick と旧スキル名の参照も更新した。
+
 ## [v0.4.1] - 2026-11-09
 
 ### skills: vrm-anime-toon-lab を追加、vrm-skin-cleanup を登載
